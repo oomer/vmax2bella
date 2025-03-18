@@ -10,10 +10,14 @@ ifeq ($(UNAME), Darwin)
 	LZFSELIBNAME = liblzfse.dylib
 	INCLUDEDIRS	= -I$(SDKBASE)/src
 	INCLUDEDIRS2	= -I../lzfse/src
+	INCLUDEDIRS3	= -I../PlistCpp/include
+	INCLUDEDIRS4	= -I../PlistCpp/src
 	LIBDIR		= $(SDKBASE)/lib
 	LIBDIRS		= -L$(LIBDIR)
 	LZFSEBUILDDIR = ../lzfse/build
 	LZFSELIBDIR	= -L$(LZFSEBUILDDIR)
+	PLISTDIR    = ../PlistCpp/build
+	PLISTLIBDIR = -L$(PLISTDIR)
 	OBJDIR		= obj/$(UNAME)
 	BINDIR		= bin/$(UNAME)
 	OUTPUT      = $(BINDIR)/$(OUTNAME)
@@ -30,13 +34,16 @@ ifeq ($(UNAME), Darwin)
 				  -fvisibility=hidden\
 				  -O3\
 				  $(INCLUDEDIRS)\
-				  $(INCLUDEDIRS2)
+				  $(INCLUDEDIRS2)\
+				  $(INCLUDEDIRS3)\
+				  $(INCLUDEDIRS4)
 
 	CFLAGS		= $(CCFLAGS)\
 				  -std=c17
 
 	CXXFLAGS    = $(CCFLAGS)\
-				  -std=c++17
+				  -std=c++17\
+				  -Wno-deprecated-declarations
 				
 	CPPDEFINES  = -DNDEBUG=1\
 				  -DDL_USE_SHARED
@@ -44,7 +51,8 @@ ifeq ($(UNAME), Darwin)
 	LIBS		= -l$(SDKNAME)\
 				  -lm\
 				  -ldl\
-				  -llzfse
+				  -llzfse\
+				  $(PLISTDIR)/libplist.a
 
 	LINKFLAGS   = -mmacosx-version-min=11.0\
 				  -isysroot $(ISYSROOT)\
@@ -61,8 +69,14 @@ else
 	SDKFNAME2   = liblzfse.so
 	INCLUDEDIRS	= -I$(SDKBASE)/src
 	INCLUDEDIRS2	= -I../lzfse/src
+	INCLUDEDIRS3	= -I../PlistCpp/include
+	INCLUDEDIRS4	= -I../PlistCpp/src
 	LIBDIR		= $(SDKBASE)/lib
 	LIBDIRS		= -L$(LIBDIR)
+	LZFSEBUILDDIR = ../lzfse/build
+	LZFSELIBDIR	= -L$(LZFSEBUILDDIR)
+	PLISTDIR    = ../PlistCpp/build
+	PLISTLIBDIR = -L$(PLISTDIR)
 	OBJDIR		= obj/$(UNAME)
 	BINDIR		= bin/$(UNAME)
 	OUTPUT      = $(BINDIR)/$(OUTNAME)
@@ -76,7 +90,9 @@ else
 				  -D_FILE_OFFSET_BITS=64\
 				  -O3\
 				  $(INCLUDEDIRS)\
-				  $(INCLUDEDIRS2)
+				  $(INCLUDEDIRS2)\
+				  $(INCLUDEDIRS3)\
+				  $(INCLUDEDIRS4)
 
 
 	CFLAGS		= $(CCFLAGS)\
@@ -93,7 +109,8 @@ else
 				  -ldl\
 				  -lrt\
 				  -lpthread\
-				  -llzfse
+				  -llzfse\
+				  $(PLISTDIR)/libplist.a
 
 	LINKFLAGS   = -m64\
 				  -fvisibility=hidden\
@@ -102,16 +119,19 @@ else
 				  -Wl,-rpath,'$$ORIGIN/lib'
 endif
 
-OBJS = vmax2bella.o
+OBJS = vmax2bella.o 
 OBJ = $(patsubst %,$(OBJDIR)/%,$(OBJS))
+
+# Define the path to the precompiled pugixml.o
+PUGIXML_OBJ = pugixml/bin/$(UNAME)/pugixml.o
 
 $(OBJDIR)/%.o: %.cpp
 	@mkdir -p $(@D)
 	$(CXX) -c -o $@ $< $(CXXFLAGS) $(CPPDEFINES)
 
-$(OUTPUT): $(OBJ)
+$(OUTPUT): $(OBJ) $(PUGIXML_OBJ)
 	@mkdir -p $(@D)
-	$(CXX) -o $@ $^ $(LINKFLAGS) $(LIBDIRS) $(LZFSELIBDIR) $(LIBS)
+	$(CXX) -o $@ $(OBJ) $(PUGIXML_OBJ) $(LINKFLAGS) $(LIBDIRS) $(LZFSELIBDIR) $(LIBS)
 	@cp $(LIBDIR)/$(SDKFNAME) $(BINDIR)/$(SDKFNAME)
 	@cp $(LZFSEBUILDDIR)/$(LZFSELIBNAME) $(BINDIR)/$(LZFSELIBNAME)
 
