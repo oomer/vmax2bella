@@ -14,11 +14,21 @@ Command line convertor from VoxelMax .vmax to DiffuseLogic .bsz
 ```
 mkdir workdir
 git clone https://github.com/lzfse/lzfse
-mkdir lzfse/build
+mkdir -p lzfse/build
 cd lzfse/build
 /Applications/CMake.app/Contents/bin/cmake ..
 make -j4
 cd ../..
+mkdir homebrew
+curl -L https://github.com/Homebrew/brew/tarball/master | tar xz --strip-components 1 -C homebrew
+eval "$(homebrew/bin/brew shellenv)"
+brew update --force --quiet
+brew install libtool autoconf automake
+git clone https://github.com/libimobiledevice/libplist
+cd libplist
+./autogen.sh
+make -j4
+cd ..
 git clone https://github.com/oomer/vmax2bella.git
 cd vmax2bella
 make
