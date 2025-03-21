@@ -24,10 +24,15 @@ ifeq ($(PLATFORM), Darwin)
     CXX                  = clang++
     
     # Architecture flags
-    ARCH_FLAGS           = -arch x86_64 -arch arm64 -mmacosx-version-min=11.0 -isysroot $(MACOS_SDK_PATH)
+    ARCH_FLAGS           = -arch arm64 -mmacosx-version-min=11.0 -isysroot $(MACOS_SDK_PATH)
     
-    # Linking flags
-    LINKER_FLAGS         = $(ARCH_FLAGS) -framework Cocoa -framework IOKit -fvisibility=hidden -O5 -rpath @executable_path
+    # Linking flags - Use multiple rpath entries to look in executable directory
+    LINKER_FLAGS         = $(ARCH_FLAGS) -framework Cocoa -framework IOKit -fvisibility=hidden -O5 \
+                          -rpath @executable_path \
+                          -rpath . 
+
+                          #-rpath @loader_path \
+                          #-Xlinker -rpath -Xlinker @executable_path
     
     # Platform-specific libraries
     PLIST_LIB            = -lplist-2.0
@@ -83,9 +88,11 @@ $(OBJ_DIR)/%.o: %.cpp
 $(OUTPUT_FILE): $(OBJECT_FILES)
 	@mkdir -p $(@D)
 	$(CXX) -o $@ $(OBJECT_FILES) $(LINKER_FLAGS) $(LIB_PATHS) $(LIBRARIES)
+	@echo "Copying libraries to $(BIN_DIR)..."
 	@cp $(SDK_LIB_PATH)/$(SDK_LIB_FILE) $(BIN_DIR)/$(SDK_LIB_FILE)
 	@cp $(LZFSE_BUILD_DIR)/$(LZFSE_LIB_NAME) $(BIN_DIR)/$(LZFSE_LIB_NAME)
-	@cp $(PLIST_LIB_DIR)/$(PLIST_LIB_NAME) $(BIN_DIR) 
+	@cp $(PLIST_LIB_DIR)/$(PLIST_LIB_NAME) $(BIN_DIR)/
+	@echo "Build complete: $(OUTPUT_FILE)"
 
 .PHONY: clean
 clean:
