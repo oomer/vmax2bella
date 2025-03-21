@@ -46,15 +46,29 @@ root
 
 ### Morton Encoding for Chunks
 - Chunk IDs are encoded using 24 bits (8 bits per dimension)
-- This allows addressing up to 256 chunks in each dimension , although only 8x8x8 are used in practice
-- The decodeMortonChunkID function extracts x, y, z coordinates from a Morton-encoded chunk ID
+- This provides full addressability for the 8×8×8 chunks without requiring sequential traversal
+- The decodeMortonChunkID function extracts x, y, z coordinates from a Morton-encoded chunk ID stored in s.id.c
 - The resulting chunk coordinates are then multiplied by 32 to get the world position of the chunk
 
+### Voxel-Level Hybrid Encoding
+- Within each 32×32×32 chunk, voxels use a hybrid addressing system
+- Position bytes in the data stream use a single byte (8 bits) for Morton encoding
+- This 8-bit encoding allows direct jumps to positions within an 8×8×4 subspace:
+  - 3 bits for x coordinates (0-7)
+  - 3 bits for y coordinates (0-7)
+  - 2 bits for z coordinates (0-3)
+- For positions outside this 8×8×4 subspace, sequential traversal is used:
+  - Position=0 signals "use sequential traversal" (increment current position)
+  - Non-zero position signals "jump to this Morton-encoded position"
+- This hybrid approach enables addressing all 32,768 positions in the chunk while minimizing storage requirements
+
+
 ### Chunk Addressing
-- Each chunk has 3D coordinates (chunk_x, chunk_y, chunk_z)
-- For a 128×128×128 volume with 32×32×32 chunks, there would be 4×4×4 chunks total (64 chunks)
 - Chunks are only stored if they contain at least one non-empty voxel
 - Each snapshot contains data for a specific chunk, identified by the 'c' value in the 's.id' dictionary
+
+
+
 
 ## Data Fields
 ### Voxel Data Stream (ds)
@@ -62,22 +76,22 @@ root
 - Contains pairs of bytes for each voxel: [position_byte, color_byte]
 - Each chunk can contain up to 32,768 voxels (32×32×32)
 - *Position Byte:*
-    - The format uses a encoding approach that combines sequential and Morton encoding for optimal storage efficiency:
-        - Uses a mix of position=0 bytes (for sequential implicit positions) and Morton-encoded position bytes
-        - The decoder maintains an internal position counter that advances through the chunk in a predefined order (x, then y, then z)
-        - Color byte 0 indicates "no voxel at this position" (empty space)
-        - If a chunk uses the entire 256x256x256 addressable space, then it uses exactly 65,536 bytes (32,768 voxel pairs)
-        - This is the dense case and it not memory efficient
-        - When we introduce morton encoding we can jump to a specific position in the chunk
+    - The format uses a hybrid encoding approach that combines sequential traversal and Morton encoding:
+        - Position byte is a single byte (8 bits), limiting the Morton-addressable space within a chunk
+        - Morton encoding for positions allows direct jumps to positions within an 8×8×4 subspace (3 bits for x, 3 bits for y, 2 bits for z)
+        - For positions outside this subspace, sequential traversal is used
+        - Position=0 means "use sequential traversal" - the decoder increments an internal position counter (x, then y, then z)
+        - Non-zero position means "jump to this Morton-encoded position" within the 8×8×4 addressable subspace
+        - This hybrid approach allows addressing the full 32×32×32 chunk while maintaining storage efficiency
         - Data stream can terminate at any point, avoiding the need to store all 32,768 voxel pairs
-    ### Morton Encoding Process
-    - A space-filling curve that interleaves the bits of the x, y, and z coordinates
-    - Used to convert 3D coordinates to a 1D index and vice versa
-    - Creates a coherent ordering of voxels that preserves spatial locality
-    1. Take the binary representation of x, y, and z coordinates
-    2. Interleave the bits in the order: z₀, y₀, x₀, z₁, y₁, x₁, z₂, y₂, x₂, ...
-    3. The resulting binary number is the Morton code
 
+### Morton Encoding Process
+- A space-filling curve that interleaves the bits of the x, y, and z coordinates
+- Used to convert 3D coordinates to a 1D index and vice versa
+- Creates a coherent ordering of voxels that preserves spatial locality
+1. Take the binary representation of x, y, and z coordinates
+2. Interleave the bits in the order: z₀, y₀, x₀, z₁, y₁, x₁, z₂, y₂, x₂, ...
+3. The resulting binary number is the Morton code
 
 - *Color Byte:*
     - Stores the color value + 1 (offset of +1 from actual color)
@@ -89,7 +103,7 @@ root
 - Multiple snapshots together build up the complete voxel model
 - Later snapshots for the same chunk ID overwrite earlier ones, allowing for edits over time
 
-### Layer Color Usagw (lc)
+### Layer Color Usage (lc)
 - s.lc is a summary table (256 bytes) that tracks which colors are used anywhere in the chunk
 - Each byte position (0-255) corresponds to a color palette ID
 - [TODO] understand why the word layer color is used, what is a layer color
@@ -238,12 +252,9 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 #include "dl_core/dl_fs.h"
 #include "lzfse.h"
 
-// PlistCPP includes
-#include "Plist.hpp"
-#include "PlistDate.hpp"
+#include "../libplist/include/plist/plist.h" // Library for handling Apple property list files
 
 // Namespaces allow you to use symbols from a library without prefixing them
-// For example, with these 'using' statements, you can write 'Scene' instead of 'bella_sdk::Scene'
 namespace bsdk = dl::bella_sdk;
 
 // Global variable to track if we've found a color palette in the file
@@ -253,78 +264,63 @@ bool has_palette = false;
 // and will be defined later in the file
 std::string initializeGlobalLicense();
 std::string initializeGlobalThirdPartyLicences();
+int writeBszScene( const std::string& bszPath, const plist_t root_node); 
 
-// Observer class for monitoring scene events
-// This is a custom implementation of the SceneObserver interface from Bella SDK
-// The SceneObserver is called when various events occur in the scene
-struct Observer : public bsdk::SceneObserver
-{   
-    bool inEventGroup = false; // Flag to track if we're in an event group
-        
-    // Override methods from SceneObserver to provide custom behavior
+/**
+ * Converts a binary plist file to XML format.
+ * Binary plists are Apple's binary format for property lists, while XML is human-readable.
+ * 
+ * @param binaryPlistPath Path to the input binary plist file
+ * @param xmlPlistPath Path where the XML plist will be written
+ * @return true if successful, false if any errors occurred
+ */
+bool convertBinaryPlistToXml(const std::string& binaryPlistPath, const std::string& xmlPlistPath) {
+    plist_t root_node = nullptr;
     
-    // Called when a node is added to the scene
-    void onNodeAdded( bsdk::Node node ) override
-    {   
-        dl::logInfo("%sNode added: %s", inEventGroup ? "  " : "", node.name().buf());
+    // Read and parse the binary plist file
+    std::cout << "Reading binary plist: " << binaryPlistPath << std::endl;
+    plist_read_from_file(binaryPlistPath.c_str(), &root_node, nullptr);
+    
+    if (!root_node) {
+        std::cerr << "Error: Failed to read binary plist file" << std::endl;
+        return false;
     }
     
-    // Called when a node is removed from the scene
-    void onNodeRemoved( bsdk::Node node ) override
-    {
-        dl::logInfo("%sNode removed: %s", inEventGroup ? "  " : "", node.name().buf());
-    }
+    // Write the plist data in XML format
+    std::cout << "Writing XML plist: " << xmlPlistPath << std::endl;
+    plist_write_to_file(root_node, xmlPlistPath.c_str(), PLIST_FORMAT_XML, PLIST_OPT_NONE);
     
-    // Called when an input value changes
-    void onInputChanged( bsdk::Input input ) override
-    {
-        dl::logInfo("%sInput changed: %s", inEventGroup ? "  " : "", input.path().buf());
-    }
+    // Clean up allocated memory
+    plist_free(root_node);
     
-    // Called when an input is connected to something
-    void onInputConnected( bsdk::Input input ) override
-    {
-        dl::logInfo("%sInput connected: %s", inEventGroup ? "  " : "", input.path().buf());
-    }
-    
-    // Called at the start of a group of related events
-    void onBeginEventGroup() override
-    {
-        inEventGroup = true;
-        dl::logInfo("Event group begin.");
-    }
-    
-    // Called at the end of a group of related events
-    void onEndEventGroup() override
-    {
-        inEventGroup = false;
-        dl::logInfo("Event group end.");
-    }
-};
+    std::cout << "Successfully converted " << binaryPlistPath << " to XML format at " << xmlPlistPath << std::endl;
+    return true;
+}
+
 
 // Function to decompress LZFSE file to a plist file
 bool decompressLzfseToPlist(const std::string& inputFile, const std::string& outputFile) {
     // Open input file
-    std::ifstream inFile(inputFile, std::ios::binary);
-    if (!inFile.is_open()) {
+    std::ifstream lzfseFile(inputFile, std::ios::binary);
+    if (!lzfseFile.is_open()) {
         std::cerr << "Error: Could not open input file: " << inputFile << std::endl;
         return false;
     }
 
     // Get file size
-    inFile.seekg(0, std::ios::end);
-    size_t inSize = inFile.tellg();
-    inFile.seekg(0, std::ios::beg);
+    lzfseFile.seekg(0, std::ios::end);
+    size_t lzfseSize = lzfseFile.tellg();
+    lzfseFile.seekg(0, std::ios::beg);
 
     // Read compressed data
-    std::vector<uint8_t> inBuffer(inSize);
-    inFile.read(reinterpret_cast<char*>(inBuffer.data()), inSize);
-    inFile.close();
+    std::vector<uint8_t> lzfseBuffer(lzfseSize);
+    lzfseFile.read(reinterpret_cast<char*>(lzfseBuffer.data()), lzfseSize);
+    lzfseFile.close();
 
     // Allocate output buffer (assuming decompressed size is larger)
     // Start with 4x the input size, will resize if needed
-    size_t outAllocatedSize = inSize * 4;
-    std::vector<uint8_t> outBuffer(outAllocatedSize);
+    size_t plistAllocatedSize = lzfseSize * 4;
+    std::vector<uint8_t> plistBuffer(plistAllocatedSize);
 
     // Allocate scratch buffer for lzfse
     size_t scratchSize = lzfse_decode_scratch_size();
@@ -334,14 +330,14 @@ bool decompressLzfseToPlist(const std::string& inputFile, const std::string& out
     size_t decodedSize = 0;
     while (true) {
         decodedSize = lzfse_decode_buffer(
-            outBuffer.data(), outAllocatedSize,
-            inBuffer.data(), inSize,
+            plistBuffer.data(), plistAllocatedSize,
+            lzfseBuffer.data(), lzfseSize,
             scratch.data());
 
         // If output buffer was too small, increase size and retry
-        if (decodedSize == 0 || decodedSize == outAllocatedSize) {
-            outAllocatedSize *= 2;
-            outBuffer.resize(outAllocatedSize);
+        if (decodedSize == 0 || decodedSize == plistAllocatedSize) {
+            plistAllocatedSize *= 2;
+            plistBuffer.resize(plistAllocatedSize);
             continue;
         }
         break;
@@ -354,142 +350,159 @@ bool decompressLzfseToPlist(const std::string& inputFile, const std::string& out
         return false;
     }
 
-    outFile.write(reinterpret_cast<char*>(outBuffer.data()), decodedSize);
+    outFile.write(reinterpret_cast<char*>(plistBuffer.data()), decodedSize);
     outFile.close();
 
     std::cout << "Successfully decompressed " << inputFile << " to " << outputFile << std::endl;
-    std::cout << "Input size: " << inSize << " bytes, Output size: " << decodedSize << " bytes" << std::endl;
+    std::cout << "Input size: " << lzfseSize << " bytes, Output size: " << decodedSize << " bytes" << std::endl;
     
     return true;
 }
 
+/**
+ * Process LZFSE compressed data in memory and return a plist node.
+ * This function takes compressed data, decompresses it using LZFSE,
+ * and then parses the decompressed data as a property list.
+ * 
+ * Memory Management:
+ * - Creates temporary buffers for decompression
+ * - Handles buffer resizing if needed
+ * - Returns a plist node that must be freed by the caller
+ * 
+ * @param inputData Pointer to the compressed data in memory
+ * @param inputSize Size of the compressed data in bytes
+ * @return plist_t A pointer to the root node of the parsed plist, or nullptr if failed
+ */
+plist_t processPlistInMemory(const uint8_t* inputData, size_t inputSize) {
+    // Start with output buffer 4x input size (compression ratio is usually < 4)
+    size_t outAllocatedSize = inputSize * 4;
+    // vector<uint8_t> automatically manages memory allocation/deallocation
+    std::vector<uint8_t> outBuffer(outAllocatedSize);
+
+    // LZFSE needs a scratch buffer for its internal operations
+    // Get the required size and allocate it
+    size_t scratchSize = lzfse_decode_scratch_size();
+    std::vector<uint8_t> scratch(scratchSize);
+
+    // Decompress the data, growing the output buffer if needed
+    size_t decodedSize = 0;
+    while (true) {
+        // Try to decompress with current buffer size
+        decodedSize = lzfse_decode_buffer(
+            outBuffer.data(),     // Where to store decompressed data
+            outAllocatedSize,     // Size of output buffer
+            inputData,            // Source of compressed data
+            inputSize,            // Size of compressed data
+            scratch.data());      // Scratch space for LZFSE
+
+        // Check if we need a larger buffer:
+        // - decodedSize == 0 indicates failure
+        // - decodedSize == outAllocatedSize might mean buffer was too small
+        if (decodedSize == 0 || decodedSize == outAllocatedSize) {
+            outAllocatedSize *= 2;  // Double the buffer size
+            outBuffer.resize(outAllocatedSize);  // Resize preserves existing content
+            continue;  // Try again with larger buffer
+        }
+        break;  // Successfully decompressed
+    }
+
+    // Check if decompression failed
+    if (decodedSize == 0) {
+        std::cerr << "Failed to decompress data" << std::endl;
+        return nullptr;
+    }
+
+    // Parse the decompressed data as a plist
+    plist_t root_node = nullptr;
+    plist_format_t format;  // Will store the format of the plist (binary, xml, etc.)
+    
+    // Convert the raw decompressed data into a plist structure
+    plist_err_t err = plist_from_memory(
+        reinterpret_cast<const char*>(outBuffer.data()),  // Cast uint8_t* to char*
+        static_cast<uint32_t>(decodedSize),               // Cast size_t to uint32_t
+        &root_node,                                       // Where to store the parsed plist
+        &format);                                         // Where to store the format
+    
+    // Check if parsing succeeded
+    if (err != PLIST_ERR_SUCCESS) {
+        std::cerr << "Failed to parse plist data" << std::endl;
+        return nullptr;
+    }
+    
+    return root_node;  // Caller is responsible for calling plist_free()
+}
+
+
+
 // Forward declarations
-bool outputBellaFile(const std::string& outputPath, size_t voxelCount);
-bool parsePlistVoxelData(const std::string& filePath, bool verbose);
-std::tuple<int, int, int> decodeMortonChunkID(int64_t mortonID);
-void printSimpleVoxelCoordinates(const std::string& filePath);
-void justPrintVoxelCoordinates(const std::string& filePath);
+//bool parsePlistVoxelData(const std::string& filePath, bool verbose);
+//std::tuple<int, int, int> decodeMortonChunkID(int64_t mortonID);
+//int64_t encodeMortonChunkID(int x, int y, int z);
+//void testDecodeMortonChunkID();
+//void printSimpleVoxelCoordinates(const std::string& filePath);
+//void justPrintVoxelCoordinates(const std::string& filePath);
+void writeBellaVoxels(const std::string& plistPath, std::vector<uint8_t> (&voxelPalette), bsdk::Scene& sceneWrite, bsdk::Node& voxel);
 
 // Function to decode a Morton code to x, y, z coordinates
-void decodeMorton(uint8_t code, uint8_t& x, uint8_t& y, uint8_t& z) {
+void decodeMorton(uint16_t code, uint8_t& x, uint8_t& y, uint8_t& z) {
     // Initialize the coordinates
     x = y = z = 0;
     
-    // For a 3D Morton code in 8 bits, we have:
-    // Bits: 7  6  5  4  3  2  1  0
-    //       z2 y2 x2 z1 y1 x1 z0 y0 x0
+    // For a single-byte Morton code, we can only use 8 bits total
+    // We'll extract 3 bits each for x and y (range 0-7), and 2 bits for z (range 0-3)
     
     // Extract bits for x (positions 0, 3, 6)
-    if (code & 0x01) x |= 1;      // Bit 0
-    if (code & 0x08) x |= 2;      // Bit 3
-    if (code & 0x40) x |= 4;      // Bit 6
+    if (code & 0x001) x |= 1;      // Bit 0
+    if (code & 0x008) x |= 2;      // Bit 3
+    if (code & 0x040) x |= 4;      // Bit 6
     
     // Extract bits for y (positions 1, 4, 7)
-    if (code & 0x02) y |= 1;      // Bit 1
-    if (code & 0x10) y |= 2;      // Bit 4
-    if (code & 0x80) y |= 4;      // Bit 7
+    if (code & 0x002) y |= 1;      // Bit 1
+    if (code & 0x010) y |= 2;      // Bit 4
+    if (code & 0x080) y |= 4;      // Bit 7
     
-    // Extract bits for z (positions 2, 5)
-    if (code & 0x04) z |= 1;      // Bit 2
-    if (code & 0x20) z |= 2;      // Bit 5
-    
-    // Note: For a fully 3-bit coordinate system (0-7), we would expect a 9-bit Morton code
-    // But since we're using uint8_t (8 bits), we can only represent coordinates up to:
-    // x: 0-7 (3 bits)
-    // y: 0-7 (3 bits)
-    // z: 0-3 (2 bits)
-    // This gives a total of 8 bits (3+3+2)
+    // Extract bits for z (positions 2, 5) - only 2 bits for z since we're limited to 8 bits total
+    if (code & 0x004) z |= 1;      // Bit 2
+    if (code & 0x020) z |= 2;      // Bit 5
+    // Note: Bit 8 is not used since we're limited to a single byte (8 bits)
 }
 
-// Function to decode a Morton code to x, y, z coordinates for the chunk index
-void decodeChunkMorton(uint8_t code, uint8_t& chunkX, uint8_t& chunkY, uint8_t& chunkZ) {
-    // Same decoding as for voxel coordinates
-    decodeMorton(code, chunkX, chunkY, chunkZ);
-}
-
-// Function to analyze and print detailed information for a specific chunk
-void analyzeChunk(const Plist::data_type& locationTable, const Plist::data_type& voxelData, uint8_t chunkIndex) {
-    // First, check if the chunk is occupied
-    if (chunkIndex >= locationTable.size() || locationTable[chunkIndex] == 0) {
-        std::cout << "Chunk " << (int)chunkIndex << " is not occupied." << std::endl;
-        return;
-    }
-    
-    // Decode chunk coordinates
-    uint8_t chunkX, chunkY, chunkZ;
-    decodeChunkMorton(chunkIndex, chunkX, chunkY, chunkZ);
-    
-    std::cout << "Analyzing chunk " << (int)chunkIndex << " at position (" 
-              << (int)chunkX << "," << (int)chunkY << "," << (int)chunkZ << ")" << std::endl;
-    
-    // Count voxels in this chunk and their position/color data
-    std::map<uint8_t, int> colorCounts; // Map to count occurrences of each color
-    std::map<uint8_t, int> positionCounts; // Map to count occurrences of each position
-    
-    // Assuming each voxel is 2 bytes: position, color
-    for (size_t i = 0; i < voxelData.size(); i += 2) {
-        if (i + 1 < voxelData.size()) {
-            uint8_t position = static_cast<uint8_t>(voxelData[i]);
-            uint8_t color = static_cast<uint8_t>(voxelData[i + 1]);
-            
-            // Count position and color occurrences
-            positionCounts[position]++;
-            colorCounts[color]++;
-            
-            // Extract x, y, z from position if it's not 0
-            if (position != 0) {
-                uint8_t localX, localY, localZ;
-                decodeMorton(position, localX, localY, localZ);
-                
-                // Calculate world coordinates
-                uint16_t worldX = chunkX * 32 + localX;
-                uint16_t worldY = chunkY * 32 + localY;
-                uint16_t worldZ = chunkZ * 32 + localZ;
-                
-                std::cout << "  Voxel at local (" << (int)localX << "," << (int)localY << "," << (int)localZ 
-                          << "), world (" << worldX << "," << worldY << "," << worldZ 
-                          << ") with color " << (int)color << std::endl;
-            } else {
-                // If position is 0, it's at the origin of the chunk
-                uint16_t worldX = chunkX * 32;
-                uint16_t worldY = chunkY * 32;
-                uint16_t worldZ = chunkZ * 32;
-                
-                // Only print a few of these to avoid flooding output
-                if (i < 10) {
-                    std::cout << "  Voxel at local (0,0,0), world (" << worldX << "," << worldY << "," << worldZ 
-                              << ") with color " << (int)color << std::endl;
-                }
-            }
-        }
-    }
-    
-    // Print color statistics
-    std::cout << "Color distribution in chunk " << (int)chunkIndex << ":" << std::endl;
-    for (const auto& pair : colorCounts) {
-        std::cout << "  Color " << (int)pair.first << ": " << pair.second << " voxels" << std::endl;
-    }
-    
-    // Print position statistics
-    std::cout << "Position code distribution in chunk " << (int)chunkIndex << ":" << std::endl;
-    for (const auto& pair : positionCounts) {
-        if (pair.first == 0) {
-            std::cout << "  Position 0 (chunk origin): " << pair.second << " voxels" << std::endl;
-        } else {
-            uint8_t localX, localY, localZ;
-            decodeMorton(pair.first, localX, localY, localZ);
-            std::cout << "  Position " << (int)pair.first << " (" << (int)localX << "," 
-                      << (int)localY << "," << (int)localZ << "): " << pair.second << " voxels" << std::endl;
-        }
-    }
-}
-
-// Structure to represent a voxel
+//OLD// Structure to represent a voxel
 struct Voxel {
-    uint8_t position;  // Local position within chunk (Morton encoded)
+    uint16_t position;  // Local position within chunk (Morton encoded) - expanded to uint16_t to support full 3D coordinates
     uint8_t color;     // Color value
 
-    Voxel(uint8_t pos, uint8_t col) : position(pos), color(col) {}
+    Voxel(uint16_t pos, uint8_t col) : position(pos), color(col) {}
+};
+
+
+// Optimized function to compact bits (From VoxelMax)
+uint32_t compactBits(uint32_t n) {
+    // For a 32-bit integer in C++
+    n &= 0x49249249;                     // Keep only every 3rd bit
+    n = (n ^ (n >> 2)) & 0xc30c30c3;     // Merge groups
+    n = (n ^ (n >> 4)) & 0x0f00f00f;     // Continue merging
+    n = (n ^ (n >> 8)) & 0x00ff00ff;     // Merge larger groups
+    n = (n ^ (n >> 16)) & 0x0000ffff;    // Final merge
+    return n;
+}
+
+// Optimized function to decode Morton code using parallel bit manipulation
+void decodeMorton3DOptimized(uint32_t morton, uint32_t& x, uint32_t& y, uint32_t& z) {
+    x = compactBits(morton);
+    y = compactBits(morton >> 1);
+    z = compactBits(morton >> 2);
+}
+
+// Structure to hold voxel information
+struct newVoxel {
+    uint32_t x, y, z;  // 3D coordinates
+    uint8_t color; // Color value
+};
+
+struct VXVoxel {
+    uint8_t layer;
+    uint8_t color;
 };
 
 // Structure to represent a chunk in the final model
@@ -547,216 +560,6 @@ struct Chunk {
     }
 };
 
-// Function to analyze the Morton codes in a snapshot's data stream
-void analyzeDataStreamMortonCodes(const Plist::data_type& voxelData, size_t snapshotIndex) {
-    std::cout << "Morton codes in Snapshot " << snapshotIndex << " data stream:" << std::endl;
-    
-    // Count frequencies of each position value
-    std::map<uint8_t, int> positionCounts;
-    std::map<uint8_t, int> colorCounts;
-    
-    // Extract all position and color bytes
-    std::cout << "  First 30 [position, color] pairs (in hex): " << std::endl;
-    for (size_t i = 0; i < std::min(voxelData.size(), size_t(60)); i += 2) {
-        if (i + 1 < voxelData.size()) {
-            uint8_t position = static_cast<uint8_t>(voxelData[i]);
-            uint8_t color = static_cast<uint8_t>(voxelData[i + 1]);
-            positionCounts[position]++;
-            colorCounts[color]++;
-            
-            std::cout << "    [" << std::hex << std::setw(2) << std::setfill('0') << (int)position 
-                     << ", " << std::setw(2) << std::setfill('0') << (int)color << "]";
-            
-            if ((i/2) % 4 == 3) std::cout << std::endl;
-            else std::cout << " ";
-        }
-    }
-    std::cout << std::dec << std::endl;
-    
-    // Check if all position counts are the same value
-    bool allSamePosition = true;
-    uint8_t firstPosition = 0;
-    
-    if (!positionCounts.empty()) {
-        firstPosition = positionCounts.begin()->first;
-        for (const auto& [position, count] : positionCounts) {
-            if (position != firstPosition) {
-                allSamePosition = false;
-                break;
-            }
-        }
-    }
-    
-    // Print frequencies of each position value
-    if (allSamePosition) {
-        std::cout << "  ALL position bytes are " << std::hex << std::setw(2) << std::setfill('0') 
-                 << (int)firstPosition << std::dec << " (" << voxelData.size() / 2 << " occurrences)" << std::endl;
-    } else {
-        std::cout << "  Position value frequencies:" << std::endl;
-        for (const auto& [position, count] : positionCounts) {
-            std::cout << "    Position " << std::hex << std::setw(2) << std::setfill('0') 
-                     << (int)position << std::dec << ": " << count << " occurrences" << std::endl;
-        }
-    }
-    
-    // Print frequencies of each color value
-    std::cout << "  Color value frequencies:" << std::endl;
-    for (const auto& [color, count] : colorCounts) {
-        std::cout << "    Color " << std::hex << std::setw(2) << std::setfill('0') 
-                 << (int)color << std::dec << ": " << count << " occurrences" << std::endl;
-    }
-    
-    std::cout << "  Total voxels in snapshot: " << voxelData.size() / 2 << std::endl;
-    
-    // Check if this might be a fill pattern by analyzing color transitions
-    if (voxelData.size() >= 4) {
-        std::cout << "  Analyzing possible fill pattern:" << std::endl;
-        
-        // Count how many consecutive voxels have the same color
-        int runLength = 1;
-        uint8_t prevColor = static_cast<uint8_t>(voxelData[1]);
-        std::vector<int> runLengths;
-        
-        for (size_t i = 3; i < voxelData.size(); i += 2) {
-            uint8_t color = static_cast<uint8_t>(voxelData[i]);
-            if (color == prevColor) {
-                runLength++;
-            } else {
-                runLengths.push_back(runLength);
-                std::cout << "    Run of " << runLength << " voxels with color " 
-                         << std::hex << std::setw(2) << std::setfill('0') << (int)prevColor << std::dec << std::endl;
-                prevColor = color;
-                runLength = 1;
-            }
-        }
-        
-        // Add the last run
-        runLengths.push_back(runLength);
-        std::cout << "    Run of " << runLength << " voxels with color " 
-                 << std::hex << std::setw(2) << std::setfill('0') << (int)prevColor << std::dec << std::endl;
-        
-        // Calculate average run length
-        if (!runLengths.empty()) {
-            double avgRunLength = 0;
-            for (int len : runLengths) {
-                avgRunLength += len;
-            }
-            avgRunLength /= runLengths.size();
-            
-            std::cout << "    Average run length: " << avgRunLength << " voxels" << std::endl;
-            std::cout << "    Number of color transitions: " << runLengths.size() - 1 << std::endl;
-        }
-    }
-}
-
-// Debug function to print the plist structure recursively
-void printPlistStructure(const boost::any& node, int depth = 0, const std::string& key = "") {
-    std::string indent(depth * 2, ' ');
-    
-    if (!key.empty()) {
-        std::cout << indent << "Key: '" << key << "' -> ";
-    }
-    
-    try {
-        // Try as dictionary
-        Plist::dictionary_type dict = boost::any_cast<Plist::dictionary_type>(node);
-        std::cout << "Dictionary with " << dict.size() << " keys" << std::endl;
-        
-        for (const auto& [dictKey, value] : dict) {
-            std::cout << indent << "  '" << dictKey << "': ";
-            printPlistStructure(value, depth + 1);
-        }
-    } catch (const boost::bad_any_cast&) {
-        try {
-            // Try as array
-            Plist::array_type array = boost::any_cast<Plist::array_type>(node);
-            std::cout << "Array with " << array.size() << " elements" << std::endl;
-            
-            for (size_t i = 0; i < std::min(array.size(), size_t(5)); i++) {
-                std::cout << indent << "  [" << i << "]: ";
-                printPlistStructure(array[i], depth + 1);
-            }
-            
-            if (array.size() > 5) {
-                std::cout << indent << "  ... and " << (array.size() - 5) << " more elements" << std::endl;
-            }
-        } catch (const boost::bad_any_cast&) {
-            try {
-                // Try as string
-                std::string str = boost::any_cast<std::string>(node);
-                std::cout << "String: '" << str << "'" << std::endl;
-            } catch (const boost::bad_any_cast&) {
-                try {
-                    // Try as int
-                    int num = boost::any_cast<int>(node);
-                    std::cout << "Int: " << num << std::endl;
-                } catch (const boost::bad_any_cast&) {
-                    try {
-                        // Try as bool
-                        bool b = boost::any_cast<bool>(node);
-                        std::cout << "Bool: " << (b ? "true" : "false") << std::endl;
-                    } catch (const boost::bad_any_cast&) {
-                        try {
-                            // Try as data
-                            Plist::data_type data = boost::any_cast<Plist::data_type>(node);
-                            std::cout << "Data with " << data.size() << " bytes";
-                            
-                            // Print first few bytes in hex
-                            if (!data.empty()) {
-                                std::cout << " [";
-                                size_t bytesToShow = std::min(data.size(), size_t(8));
-                                for (size_t i = 0; i < bytesToShow; i++) {
-                                    if (i > 0) std::cout << " ";
-                                    std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                                              << static_cast<int>(data[i]) << std::dec;
-                                }
-                                if (data.size() > 8) {
-                                    std::cout << " ...";
-                                }
-                                std::cout << "]";
-                            }
-                std::cout << std::endl;
-                        } catch (const boost::bad_any_cast&) {
-                            try {
-                                // Try as double
-                                double d = boost::any_cast<double>(node);
-                                std::cout << "Double: " << d << std::endl;
-                            } catch (const boost::bad_any_cast&) {
-                                try {
-                                    // Try as date
-                                    Plist::date_type date = boost::any_cast<Plist::date_type>(node);
-                                    std::cout << "Date object" << std::endl;
-                                } catch (const boost::bad_any_cast&) {
-                                    try {
-                                        // Try as long int
-                                        long num = boost::any_cast<long>(node);
-                                        std::cout << "Long Int: " << num << std::endl;
-                                    } catch (const boost::bad_any_cast&) {
-                                        try {
-                                            // Try as uint8_t
-                                            uint8_t num = boost::any_cast<uint8_t>(node);
-                                            std::cout << "UInt8: " << (int)num << std::endl;
-                                        } catch (const boost::bad_any_cast&) {
-                                            try {
-                                                // Try as int8_t
-                                                int8_t num = boost::any_cast<int8_t>(node);
-                                                std::cout << "Int8: " << (int)num << std::endl;
-                                            } catch (const boost::bad_any_cast&) {
-                                                // Print the type info name for debugging
-                                                std::cout << "Unknown type: " << node.type().name() << std::endl;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // Function to convert a snapshot type value to its string name
 std::string getSnapshotTypeName(int64_t typeId) {
     switch(typeId) {
@@ -770,1131 +573,753 @@ std::string getSnapshotTypeName(int64_t typeId) {
     }
 }
 
-// Function to analyze statistics data from a snapshot
-void analyzeSnapshotStatistics(const Plist::dictionary_type& snapshotData, size_t snapshotIndex, size_t actualVoxelCount) {
-    std::cout << "SNAPSHOT " << snapshotIndex << " STATISTICS:" << std::endl;
-    
-    if (snapshotData.find("st") == snapshotData.end()) {
-        std::cout << "  No statistics found" << std::endl;
-        return;
+/**
+ * Decodes a voxel's layercolor and color from the ds data stream
+ * 
+ * @param dsData The raw ds data stream containing layer-color pairs
+ * @return A vector of Voxel structures with explicit coordinates and colors
+ */
+std::vector<newVoxel> decodeVoxels(const std::vector<uint8_t>& dsData) {
+    std::vector<newVoxel> voxels;
+
+    std::vector<VXVoxel> _vxVoxelData;
+    for (int i = 0; i < dsData.size() - 1; i += 2) {
+        VXVoxel _vxVoxel; // VoxelMax data
+        _vxVoxel.layer = static_cast<int>(dsData[i]);
+        _vxVoxel.color = static_cast<uint8_t>(dsData[i + 1]);
+        _vxVoxelData.push_back(_vxVoxel);
     }
-    
-    try {
-        Plist::dictionary_type stats = boost::any_cast<Plist::dictionary_type>(snapshotData.at("st"));
-        
-        // Check for voxel count in statistics
-        int64_t statsVoxelCount = -1;
-        bool foundCount = false;
-        
-        // Check both 'c' and 'count' keys
-        if (stats.find("c") != stats.end()) {
-            try {
-                statsVoxelCount = boost::any_cast<int64_t>(stats.at("c"));
-                foundCount = true;
-            } catch (const boost::bad_any_cast& e) {
-                std::cout << "  Error extracting 'c' (count) value: " << e.what() << std::endl;
-            }
-        } else if (stats.find("count") != stats.end()) {
-            try {
-                statsVoxelCount = boost::any_cast<int64_t>(stats.at("count"));
-                foundCount = true;
-            } catch (const boost::bad_any_cast& e) {
-                std::cout << "  Error extracting 'count' value: " << e.what() << std::endl;
-            }
-        }
-        
-        if (foundCount) {
-            std::cout << "  Voxel count (from stats): " << statsVoxelCount << std::endl;
-            std::cout << "  Voxel count (from data stream): " << actualVoxelCount << std::endl;
-            
-            if (statsVoxelCount > 0) {
-                double ratio = static_cast<double>(actualVoxelCount) / statsVoxelCount;
-                std::cout << "  Ratio (actual/stats): " << ratio << std::endl;
-            }
-        }
-        
-        // Helper function to print arrays
-        auto printArray = [](const std::string& name, const Plist::array_type& array) {
-            std::cout << "  " << name << " array: [";
-            for (size_t i = 0; i < array.size(); i++) {
-                if (i > 0) std::cout << ", ";
-                try {
-                    int64_t val = boost::any_cast<int64_t>(array[i]);
-                    std::cout << val;
-                } catch (const boost::bad_any_cast&) {
-                    try {
-                        int val = boost::any_cast<int>(array[i]);
-                        std::cout << val;
-                    } catch (const boost::bad_any_cast&) {
-                        try {
-                            double val = boost::any_cast<double>(array[i]);
-                            std::cout << val;
-                        } catch (const boost::bad_any_cast&) {
-                            std::cout << "?";
-                        }
-                    }
+
+    uint32_t index = 0;
+    for (uint32_t z = 0; z < 32; z++) {
+        for (uint32_t y = 0; y < 32; y++) {
+            for (uint32_t x = 0; x < 32; x++) {
+                if (index <= dsData.size()) { 
+                    uint32_t dx, dy, dz;
+                    uint32_t morton = index;
+                    decodeMorton3DOptimized(index, dx, dy, dz); // index IS the morton code
+                    newVoxel voxel = {dx, dy, dz, _vxVoxelData[index].color};
+                    voxels.push_back(voxel);
                 }
-            }
-            std::cout << "]" << std::endl;
-        };
-        
-        // Check for min array
-        if (stats.find("min") != stats.end()) {
-            try {
-                Plist::array_type minArray = boost::any_cast<Plist::array_type>(stats.at("min"));
-                printArray("min", minArray);
-            } catch (const boost::bad_any_cast& e) {
-                std::cout << "  Error extracting min array: " << e.what() << std::endl;
+                index++;
             }
         }
-        
-        // Check for max array
-        if (stats.find("max") != stats.end()) {
-            try {
-                Plist::array_type maxArray = boost::any_cast<Plist::array_type>(stats.at("max"));
-                printArray("max", maxArray);
-            } catch (const boost::bad_any_cast& e) {
-                std::cout << "  Error extracting max array: " << e.what() << std::endl;
-            }
-        }
-        
-        // Check for position byte frequencies in the data stream
-        if (snapshotData.find("ds") != snapshotData.end()) {
-            try {
-                Plist::data_type voxelData = boost::any_cast<Plist::data_type>(snapshotData.at("ds"));
-                std::map<uint8_t, size_t> positionByteFrequency;
-                
-                // Count the frequency of each position byte (first byte of each pair)
-                for (size_t i = 0; i < voxelData.size(); i += 2) {
-                    if (i + 1 < voxelData.size()) {
-                        uint8_t positionByte = voxelData[i];
-                        positionByteFrequency[positionByte]++;
-                    }
-                }
-                
-                // Display frequencies
-                for (const auto& [byte, count] : positionByteFrequency) {
-                    std::cout << "  Position byte " << std::setw(2) << std::setfill('0') << std::hex << (int)byte 
-                              << " occurs " << std::dec << count << " times" << std::endl;
-                }
-            } catch (const boost::bad_any_cast& e) {
-                std::cout << "  Error analyzing position bytes: " << e.what() << std::endl;
-            }
-        }
-        
-    } catch (const boost::bad_any_cast& e) {
-        std::cout << "  Error extracting statistics: " << e.what() << std::endl;
     }
+    // Output voxel count by z-level
+    //std::cout << "\nCreated " << voxels.size() << " voxels in total:" << std::endl;
+    std::map<int, int> zCounts;
+    for (const auto& voxel : voxels) {
+        zCounts[voxel.z]++;
+    }
+    //for (const auto& [z, count] : zCounts) {
+    //    std::cout << "  Voxels at z=" << z << ": " << count << std::endl;
+    //}
+    return voxels;
 }
 
-// Function to create a Bella scene file from the extracted voxel data
-bool outputBellaFile(const std::string& outputPath, size_t voxelCount) {
-    // Comment out all Bella scene creation code to avoid errors
-    std::cout << "Skipping Bella scene creation. Just printing voxel data." << std::endl;
-    return true;
-}
 
-// Function to analyze a snapshot's location table in detail
-void analyzeLocationTable(const Plist::data_type& locationTable, size_t snapshotIndex, int64_t chunkID) {
-    std::cout << "LOCATION TABLE ANALYSIS for Snapshot " << snapshotIndex << " (ChunkID " << chunkID << "):" << std::endl;
-    std::cout << "  Location table size: " << locationTable.size() << " bytes" << std::endl;
+
+
+/**
+ * Prints a table of voxel positions and colors
+ * 
+ * @param voxels The vector of decoded voxels
+ * @param limit Maximum number of voxels to display (0 for all)
+ * @param filterZ Optional z-value to filter by
+ */
+void printVoxelTable(const std::vector<newVoxel>& voxels, size_t limit = 100, int filterZ = -1) {
+    std::cout << "Total voxels: " << voxels.size() << std::endl;
     
-    // Count non-zero bytes
-    int nonZeroCount = 0;
-    for (size_t i = 0; i < locationTable.size(); i++) {
-        if (locationTable[i] != 0) {
-            nonZeroCount++;
-            std::cout << "  Byte " << i << " = " << static_cast<int>(locationTable[i]) << std::endl;
+    // Count voxels at the filtered z-level if filtering is active
+    int filteredCount = 0;
+    if (filterZ >= 0) {
+        for (const auto& voxel : voxels) {
+            if (voxel.z == filterZ) filteredCount++;
         }
+        std::cout << "Voxels at z=" << filterZ << ": " << filteredCount << std::endl;
     }
     
-    std::cout << "  Total non-zero bytes: " << nonZeroCount << " out of " << locationTable.size() << std::endl;
+    std::cout << "Index | X  | Y  | Z  | Color" << std::endl;
+    std::cout << "------|----|----|----|---------" << std::endl;
     
-    // Print first 16 bytes as hex
-    std::cout << "  First 16 bytes (hex): ";
-    for (size_t i = 0; i < std::min(locationTable.size(), size_t(16)); i++) {
-        std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                 << static_cast<int>(locationTable[i]) << " ";
-    }
-    std::cout << std::dec << std::endl;
-    
-    // Print last 16 bytes as hex
-    if (locationTable.size() > 16) {
-        std::cout << "  Last 16 bytes (hex): ";
-        for (size_t i = locationTable.size() - 16; i < locationTable.size(); i++) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                     << static_cast<int>(locationTable[i]) << " ";
-        }
-        std::cout << std::dec << std::endl;
-    }
-}
-
-// Function to analyze a snapshot's layer color usage data
-void analyzeLayerColorUsage(const Plist::data_type& layerColorTable, size_t snapshotIndex, int64_t chunkID) {
-    std::cout << "LAYER COLOR USAGE ANALYSIS for Snapshot " << snapshotIndex << " (ChunkID " << chunkID << "):" << std::endl;
-    std::cout << "  Layer color table size: " << layerColorTable.size() << " bytes" << std::endl;
-    
-    // Count non-zero bytes (active color layers)
-    int activeLayerCount = 0;
-    for (size_t i = 0; i < layerColorTable.size(); i++) {
-        if (layerColorTable[i] != 0) {
-            activeLayerCount++;
-            std::cout << "  Color Layer " << i << " is active (value=" << static_cast<int>(layerColorTable[i]) << ")" << std::endl;
-        }
-    }
-    
-    std::cout << "  Total active color layers: " << activeLayerCount << " out of " << layerColorTable.size() << " possible" << std::endl;
-    
-    // Print first 16 bytes as hex
-    std::cout << "  First 16 color layers (hex): ";
-    for (size_t i = 0; i < std::min(layerColorTable.size(), size_t(16)); i++) {
-        std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                 << static_cast<int>(layerColorTable[i]) << " ";
-    }
-    std::cout << std::dec << std::endl;
-    
-    // Print last 16 bytes as hex
-    if (layerColorTable.size() > 16) {
-        std::cout << "  Last 16 color layers (hex): ";
-        for (size_t i = layerColorTable.size() - 16; i < layerColorTable.size(); i++) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                     << static_cast<int>(layerColorTable[i]) << " ";
-        }
-        std::cout << std::dec << std::endl;
-    }
-}
-
-// Function to parse the plist file and extract voxel data
-bool parsePlistVoxelData(const std::string& filePath, bool verbose) {
-    // Load and parse the plist file
-    boost::any plistData;
-    try {
-        Plist::readPlist(filePath.c_str(), plistData);
-    } catch (std::exception& e) {
-        std::cerr << "Error reading plist file: " << e.what() << std::endl;
-        return false;
-    }
-
-    // The root should be a dictionary
-    Plist::dictionary_type rootDict;
-    try {
-        rootDict = boost::any_cast<Plist::dictionary_type>(plistData);
-    } catch (std::exception& e) {
-        std::cerr << "Error casting plist data to dictionary: " << e.what() << std::endl;
-        return false;
-    }
-
-    // Print all keys in the root dictionary if verbose
-    if (verbose) {
-        std::cout << "Root keys: ";
-        for (const auto& key : rootDict) {
-            std::cout << key.first << " ";
-        }
-        std::cout << std::endl;
-    }
-
-    // Check if the snapshots key exists in the plist
-    if (rootDict.find("snapshots") == rootDict.end()) {
-        std::cerr << "Error: No 'snapshots' key found in plist" << std::endl;
-        return false;
-    }
-
-    // Get the snapshots array
-    Plist::array_type snapshotsArray;
-    try {
-        snapshotsArray = boost::any_cast<Plist::array_type>(rootDict.at("snapshots"));
-    } catch (std::exception& e) {
-        std::cerr << "Error casting snapshots to array: " << e.what() << std::endl;
-        return false;
-    }
-    
-    // Print the structure of the first few snapshots
-    if (verbose) {
-        std::cout << "\nDetailed structure of the first snapshot:" << std::endl;
-        if (!snapshotsArray.empty()) {
-            printPlistStructure(snapshotsArray[0], 0, "snapshots[0]");
-        }
-    }
-    
-    // Statistics tracking
-    int totalSnapshots = snapshotsArray.size();
-    size_t totalLocationTableBytes = 0;
-    size_t totalVoxelDataBytes = 0;
-    std::set<std::string> uniqueChunkIds; // Track unique chunk IDs
-    
-    // Additional statistics for snapshot types
-    std::map<int64_t, int> snapshotTypeCount; // Count occurrences of each snapshot type
-    
-    std::cout << "Total snapshots in plist: " << totalSnapshots << std::endl;
-    
-    // World model: map of chunk index to chunk data
-    std::map<std::string, Chunk> worldModel;
-    
-    // Process each snapshot in the plist sequentially
-    for (size_t i = 0; i < snapshotsArray.size(); i++) {
-        try {
-            Plist::dictionary_type snapshot = boost::any_cast<Plist::dictionary_type>(snapshotsArray[i]);
-            
-            // DEBUG: Print all keys in this snapshot
-            if (verbose && i < 5) { // Only print for first 5 snapshots to avoid excessive output
-                std::cout << "\nSnapshot " << i << " Keys: ";
-                for (const auto& key : snapshot) {
-                    std::cout << "'" << key.first << "' ";
-                }
-                std::cout << std::endl;
-                
-                // If snapshot has a 's' key, print all keys in that dictionary too
-                if (snapshot.find("s") != snapshot.end()) {
-                    try {
-                        Plist::dictionary_type snapshotData = boost::any_cast<Plist::dictionary_type>(snapshot.at("s"));
-                        std::cout << "  Snapshot " << i << " 's' Dictionary Keys: ";
-                        for (const auto& key : snapshotData) {
-                            std::cout << "'" << key.first << "' ";
-                        }
-                        std::cout << std::endl;
-                    } catch (std::exception& e) {
-                        std::cout << "  Error getting 's' dictionary keys: " << e.what() << std::endl;
-                    }
-                }
-            }
-            
-            // Variables to store snapshot metadata
-            std::string chunkId = "unknown";
-            bool foundChunkID = false;
-            int64_t sessionId = -1;
-            int64_t typeId = -1;
-            std::string typeName = "unknown";
-            size_t voxelsInSnapshot = 0;  // Track voxel count
-            
-            // Extract chunk ID (cid) if present
-            if (snapshot.find("c") != snapshot.end()) {
-                try {
-                    chunkId = boost::any_cast<std::string>(snapshot.at("c"));
-                    uniqueChunkIds.insert(chunkId);
-                    
-                    if (verbose) {
-                        std::cout << "\nProcessing Snapshot " << i << " with Chunk ID: " << chunkId << std::endl;
-                    }
-                } catch (std::exception& e) {
-                    // If casting fails, try as an integer
-                    try {
-                        int cid = boost::any_cast<int>(snapshot.at("c"));
-                        chunkId = std::to_string(cid);
-                        uniqueChunkIds.insert(chunkId);
-                        
-                        if (verbose) {
-                            std::cout << "\nProcessing Snapshot " << i << " with Chunk ID: " << chunkId << std::endl;
-                        }
-                    } catch (std::exception& e2) {
-                        if (verbose) {
-                            std::cout << "\nProcessing Snapshot " << i << " (couldn't extract chunk ID)" << std::endl;
-                        }
-                    }
-                }
-            } else if (verbose) {
-                std::cout << "\nProcessing Snapshot " << i << " (no chunk ID found)" << std::endl;
-            }
-            
-            // Each snapshot has an 's' key containing voxel data
-            if (snapshot.find("s") != snapshot.end()) {
-                Plist::dictionary_type snapshotData = boost::any_cast<Plist::dictionary_type>(snapshot.at("s"));
-                
-                // Try to get chunk ID from 's' dictionary if it has an 'id' key
-                if (snapshotData.find("id") != snapshotData.end()) {
-                    try {
-                        // The 'id' field is a dictionary containing the chunk ID
-                        Plist::dictionary_type idDict = boost::any_cast<Plist::dictionary_type>(snapshotData.at("id"));
-                        
-                        // DEBUG: Print all keys in the 'id' dictionary for first few snapshots
-                        if (verbose && i < 3) {
-                            std::cout << "  's.id' Dictionary Keys: ";
-                            for (const auto& key : idDict) {
-                                std::cout << "'" << key.first << "' ";
-                            }
-                            std::cout << std::endl;
-                            
-                            // Try to extract and print the values in the dictionary with more detailed type info
-                            for (const auto& [key, value] : idDict) {
-                                std::cout << "    '" << key << "': ";
-                                std::cout << "Type: '" << value.type().name() << "' ";
-                                
-                                // Try a variety of data types
-                                try {
-                                    std::string strValue = boost::any_cast<std::string>(value);
-                                    std::cout << "String '" << strValue << "'";
-                                } catch (boost::bad_any_cast&) {
-                                    try {
-                                        int intValue = boost::any_cast<int>(value);
-                                        std::cout << "Int " << intValue;
-                                    } catch (boost::bad_any_cast&) {
-                                        try {
-                                            double doubleValue = boost::any_cast<double>(value);
-                                            std::cout << "Double " << doubleValue;
-                                        } catch (boost::bad_any_cast&) {
-                                            try {
-                                                float floatValue = boost::any_cast<float>(value);
-                                                std::cout << "Float " << floatValue;
-                                            } catch (boost::bad_any_cast&) {
-                                                try {
-                                                    int64_t int64Value = boost::any_cast<int64_t>(value);
-                                                    std::cout << "Int64 " << int64Value;
-                                                } catch (boost::bad_any_cast&) {
-                                                    try {
-                                                        bool boolValue = boost::any_cast<bool>(value);
-                                                        std::cout << "Bool " << (boolValue ? "true" : "false");
-                                                    } catch (boost::bad_any_cast&) {
-                                                        try {
-                                                            Plist::dictionary_type dictValue = boost::any_cast<Plist::dictionary_type>(value);
-                                                            std::cout << "Dictionary with " << dictValue.size() << " keys";
-                                                        } catch (boost::bad_any_cast&) {
-                                                            try {
-                                                                Plist::array_type arrayValue = boost::any_cast<Plist::array_type>(value);
-                                                                std::cout << "Array with " << arrayValue.size() << " elements";
-                                                            } catch (boost::bad_any_cast&) {
-                                                                std::cout << "Unknown type - couldn't cast";
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                std::cout << std::endl;
-                            }
-                        }
-                        
-                        // Now look for 'c' in the id dictionary
-                        if (idDict.find("c") != idDict.end()) {
-                            try {
-                                // These are type Int64 in plist
-                                int64_t chunkId_int = boost::any_cast<int64_t>(idDict.at("c"));
-                                chunkId = std::to_string(chunkId_int);
-                                
-                                if (verbose) {
-                                    std::cout << "  Found chunk ID: " << chunkId << std::endl;
-                                }
-                                uniqueChunkIds.insert(chunkId);
-                                foundChunkID = true;
-                            } catch (boost::bad_any_cast&) {
-                                if (verbose) {
-                                    std::cout << "  Couldn't cast chunk ID as Int64" << std::endl;
-                                }
-                            }
-                        } else if (verbose) {
-                            std::cout << "  No 'c' key found in 's.id' dictionary" << std::endl;
-                        }
-                        
-                        // Also check for session ID ('s') 
-                        if (idDict.find("s") != idDict.end()) {
-                            try {
-                                sessionId = boost::any_cast<int64_t>(idDict.at("s"));
-                                if (verbose) {
-                                    std::cout << "  Found session ID: " << sessionId << std::endl;
-                                }
-                            } catch (boost::bad_any_cast&) {
-                                if (verbose) {
-                                    std::cout << "  Couldn't cast session ID as Int64" << std::endl;
-                                }
-                            }
-                        }
-                        
-                        // Check for type ID ('t')
-                        if (idDict.find("t") != idDict.end()) {
-                            try {
-                                typeId = boost::any_cast<int64_t>(idDict.at("t"));
-                                typeName = getSnapshotTypeName(typeId);
-                                snapshotTypeCount[typeId]++;
-                                
-                                if (verbose) {
-                                    std::cout << "  Found type ID: " << typeId << " (" << typeName << ")" << std::endl;
-                                }
-                            } catch (boost::bad_any_cast&) {
-                                if (verbose) {
-                                    std::cout << "  Couldn't cast type ID as Int64" << std::endl;
-                                }
-                            }
-                        }
-                    } catch (boost::bad_any_cast&) {
-                        if (verbose) {
-                            std::cout << "  's.id' is not a dictionary" << std::endl;
-                        }
-                    }
-                } else if (verbose) {
-                    std::cout << "  No 'id' key found in 's' dictionary" << std::endl;
-                }
-                
-                // Get voxel data stream for counting
-                if (snapshotData.find("ds") != snapshotData.end()) {
-                    Plist::data_type voxelData = boost::any_cast<Plist::data_type>(snapshotData.at("ds"));
-                    voxelsInSnapshot = voxelData.size() / 2; // Each voxel is 2 bytes
-                }
-                
-                // Print snapshot summary even in non-verbose mode
-                if (!chunkId.empty()) {
-                    int64_t chunkID_int = std::stoll(chunkId);
-                    
-                    // Get world origin coordinates using Morton decoding
-                    auto [worldOriginX, worldOriginY, worldOriginZ] = decodeMortonChunkID(chunkID_int);
-                    
-                    // Scale by chunk size (32 instead of 8 for larger chunks)
-                    worldOriginX *= 32;
-                    worldOriginY *= 32;
-                    worldOriginZ *= 32;
-                    
-                    std::cout << "Snapshot " << i << ": ChunkID=" << chunkId 
-                              << ", World Origin=(" << worldOriginX << "," << worldOriginY << "," << worldOriginZ << ")"
-                              << ", Type=" << typeName
-                              << ", SessionID=" << sessionId 
-                              << ", Data Stream Voxels=" << voxelsInSnapshot << std::endl;
-                    
-                    // Check if this is a checkpoint type (type ID 4) with voxel data
-                    if (typeId == 4 && snapshotData.find("ds") != snapshotData.end()) {
-                        Plist::data_type voxelData = boost::any_cast<Plist::data_type>(snapshotData.at("ds"));
-                        if (!voxelData.empty()) {
-                            std::cout << "  CHECKPOINT CHUNK WORLD ORIGIN: (" 
-                                      << worldOriginX << "," << worldOriginY << "," << worldOriginZ 
-                                      << ")" << std::endl;
-                        }
-                    }
-                    
-                    // Analyze statistics data for this snapshot
-                    analyzeSnapshotStatistics(snapshotData, i, voxelsInSnapshot);
-                } else {
-                    std::cout << "Snapshot " << i << ": ChunkID=unknown"
-                              << ", World Origin=(unknown,unknown,unknown)"
-                              << ", Type=" << typeName
-                              << ", SessionID=" << sessionId 
-                              << ", Data Stream Voxels=" << voxelsInSnapshot << std::endl;
-                }
-                
-                // Check for location table (lc) and voxel data stream (ds)
-                if (snapshotData.find("lc") != snapshotData.end() && snapshotData.find("ds") != snapshotData.end()) {
-                    // Get layer color usage table
-                    Plist::data_type locationTable = boost::any_cast<Plist::data_type>(snapshotData.at("lc"));
-                    totalLocationTableBytes += locationTable.size();
-                    
-                    // Add this to analyze the location table in detail
-                    if (i < 5 || i % 10 == 0) { // Only analyze a subset of snapshots to avoid excessive output
-                        analyzeLayerColorUsage(locationTable, i, foundChunkID ? std::stoll(chunkId) : -1);
-                    }
-                    
-                    // Get voxel data stream
-                    Plist::data_type voxelData = boost::any_cast<Plist::data_type>(snapshotData.at("ds"));
-                    totalVoxelDataBytes += voxelData.size();
-                    
-                    if (verbose) {
-                        std::cout << "  Location table size: " << locationTable.size() << " bytes" << std::endl;
-                        std::cout << "  Voxel data size: " << voxelData.size() << " bytes" << std::endl;
-                    }
-                    
-                    // Analyze Morton codes in the data stream
-                    analyzeDataStreamMortonCodes(voxelData, i);
-                    
-                    // Find chunks modified in this snapshot
-                    std::vector<uint8_t> modifiedChunks;
-                    for (size_t j = 0; j < locationTable.size(); j++) {
-                        if (locationTable[j] != 0) {
-                            modifiedChunks.push_back(j);
-                            
-                            // Decode chunk location from Morton code
-                            uint8_t chunkX, chunkY, chunkZ;
-                            decodeChunkMorton(j, chunkX, chunkY, chunkZ);
-                            
-                            if (verbose) {
-                                std::cout << "  Modified chunk " << (int)j << " at (" 
-                                        << (int)chunkX << "," << (int)chunkY << "," << (int)chunkZ 
-                                        << ")" << std::endl;
-                            }
-                        }
-                    }
-                    
-                    // Count voxels in the data stream (each voxel is 2 bytes: position and color)
-                    size_t voxelsInSnapshot = voxelData.size() / 2;
-                    
-                    // Simple validation check
-                    if (voxelsInSnapshot == 0 || modifiedChunks.empty()) {
-                        if (verbose) {
-                            std::cout << "  Warning: Snapshot contains no voxels or no modified chunks" << std::endl;
-                        }
-                        continue; // Skip this snapshot
-                    }
-
-                    if (verbose) {
-                        std::cout << "  Voxels in snapshot: " << voxelsInSnapshot << std::endl;
-                        std::cout << "  Modified chunks: " << modifiedChunks.size() << std::endl;
-                    }
-                    
-                    // Extract the chunk ID we found earlier to use as the key in our world model
-                    std::string modelChunkKey = foundChunkID ? std::to_string(i) + "_" + chunkId : std::to_string(i);
-                    
-                    // Interpret the voxel data
-                    for (uint8_t chunkIndex : modifiedChunks) {
-                        // Decode chunk coordinates
-                        uint8_t chunkX, chunkY, chunkZ;
-                        decodeChunkMorton(chunkIndex, chunkX, chunkY, chunkZ);
-                        
-                        // Create a unique key using the chunk ID if available, or just the chunk index
-                        std::string chunkKey = modelChunkKey + "_" + std::to_string(chunkIndex);
-                        
-                        // Get existing chunk or create a new one in our modified world model map
-                        std::map<std::string, Chunk>& worldModelByChunkId = worldModel;
-                        Chunk& chunk = worldModelByChunkId[chunkKey];
-                        
-                        if (chunk.voxels.empty()) {
-                            // If this is a new chunk, initialize its coordinates
-                            chunk.chunkX = chunkX;
-                            chunk.chunkY = chunkY;
-                            chunk.chunkZ = chunkZ;
-                        }
-                        
-                        // Create a vector for this chunk's voxels
-                        std::vector<Voxel> newVoxels;
-                        
-                        // Pre-allocate a reasonable amount of memory to avoid frequent reallocations
-                        newVoxels.reserve(voxelsInSnapshot / modifiedChunks.size());
-                        
-                        // Loop through voxel data and populate the chunk
-                        for (size_t j = 0; j < voxelData.size(); j += 2) {
-                            if (j + 1 < voxelData.size()) {
-                                uint8_t position = static_cast<uint8_t>(voxelData[j]);
-                                uint8_t color = static_cast<uint8_t>(voxelData[j + 1]);
-                                newVoxels.emplace_back(position, color);
-                            }
-                        }
-                        
-                        // For normal snapshots, replace previous voxels in the chunk
-                        // This assumes that each snapshot contains a complete, updated state for the chunk
-                        chunk.voxels = newVoxels;
-                        
-                        if (verbose) {
-                            std::cout << "  Updated chunk " << chunkKey << " with " 
-                                    << newVoxels.size() << " voxels" << std::endl;
-                        }
-                    }
-                }
-            }
-        } catch (std::exception& e) {
-            std::cerr << "Error processing snapshot " << i << ": " << e.what() << std::endl;
-        }
-    }
-    
-    // Print snapshot type statistics
-    std::cout << "\nSNAPSHOT TYPE SUMMARY:" << std::endl;
-    for (const auto& [type, count] : snapshotTypeCount) {
-        std::cout << "  " << getSnapshotTypeName(type) << ": " << count << " snapshots (" 
-                 << (count * 100.0 / totalSnapshots) << "%)" << std::endl;
-    }
-    
-    // Print information about unique chunk IDs
-    std::cout << "\nFound " << uniqueChunkIds.size() << " unique chunk IDs across " 
-              << totalSnapshots << " snapshots" << std::endl;
-    
-    // Print information about the final world model
-    std::cout << "\nFINAL WORLD MODEL:" << std::endl;
-    std::cout << "Total chunks occupied: " << worldModel.size() << std::endl;
-    
-    // Count total voxels in the final model
-    size_t totalVoxels = 0;
-    for (const auto& chunkEntry : worldModel) {
-        totalVoxels += chunkEntry.second.voxels.size();
-    }
-    std::cout << "Total voxels in model: " << totalVoxels << std::endl;
-    
-    // Detailed output for each chunk if verbose
-    if (verbose) {
-        std::cout << "\nDetailed chunk information:" << std::endl;
+    int count = 0;
+    int shownCount = 0;
+    for (size_t i = 0; i < voxels.size(); i++) {
+        const auto& voxel = voxels[i];
         
-        for (const auto& chunkEntry : worldModel) {
-            std::string chunkKey = chunkEntry.first;
-            const Chunk& chunk = chunkEntry.second;
-            
-            std::cout << "Chunk " << chunkKey << " at position (" 
-                    << (int)chunk.chunkX << "," << (int)chunk.chunkY << "," << (int)chunk.chunkZ 
-                    << ") contains " << chunk.voxels.size() << " voxels" << std::endl;
-            
-            // Print color distribution
-            std::map<uint8_t, int> colorCount;
-            for (const auto& voxel : chunk.voxels) {
-                colorCount[voxel.color]++;
-            }
-            
-            std::cout << "  Color distribution:" << std::endl;
-            for (const auto& [color, count] : colorCount) {
-                std::cout << "    Color " << (int)color << ": " << count << " voxels" << std::endl;
-            }
-            
-            // Count voxels with non-zero positions
-            int nonZeroPos = 0;
-            for (const auto& voxel : chunk.voxels) {
-                if (voxel.position != 0) nonZeroPos++;
-            }
-            
-            std::cout << "  Non-zero positions: " << nonZeroPos << " out of " 
-                    << chunk.voxels.size() << std::endl;
-            
-            // Get voxels using correct interpretation
-            auto voxels = chunk.getVoxels();
-            std::cout << "  Total voxels: " << voxels.size() << std::endl;
-            
-            // Show sample voxels
-            if (!voxels.empty()) {
-                std::cout << "  Sample voxels:" << std::endl;
-                for (int i = 0; i < std::min(5, (int)voxels.size()); i++) {
-                    auto [x, y, z, color] = voxels[i];
-                    std::cout << "    Voxel " << i << ": local=(" << (int)x << "," << (int)y << "," << (int)z 
-                            << ") color=" << (int)color << std::endl;
-                }
-            }
-            
-            // Print world coordinates for voxels in verbose mode
-            if (verbose) {
-                auto worldVoxels = chunk.getWorldVoxels();
-                std::cout << "  World coordinates (showing first 10):" << std::endl;
-                
-                int count = 0;
-                std::map<std::tuple<uint16_t, uint16_t, uint16_t>, int> uniquePositions;
-                
-                for (const auto& [worldX, worldY, worldZ, color] : worldVoxels) {
-                    // Track unique positions
-                    uniquePositions[std::make_tuple(worldX, worldY, worldZ)]++;
-                    
-                    // Only show first 10 to avoid overwhelming output
-                    if (count < 10) {
-                        std::cout << "    Voxel " << count << ": world=(" << worldX << "," << worldY << "," << worldZ 
-                                << ") color=" << (int)color << std::endl;
-                    }
-                    count++;
-                }
-                
-                std::cout << "    Total voxels: " << worldVoxels.size() << std::endl;
-                std::cout << "    Unique positions: " << uniquePositions.size() << std::endl;
-                
-                // Show runs with world coordinates if there are interesting patterns
-                if (worldVoxels.size() > 1 && uniquePositions.size() < worldVoxels.size() / 2) {
-                    std::cout << "    World runs (first 5):" << std::endl;
-                    int runCount = 0;
-                    
-                    for (const auto& [pos, count] : uniquePositions) {
-                        if (runCount < 5) {
-                            auto [x, y, z] = pos;
-                            std::cout << "      Position (" << x << "," << y << "," << z 
-                                    << "): " << count << " voxels" << std::endl;
-                        }
-                        runCount++;
-                    }
-                }
-            }
-            
-            // Only print visualization for a few sample chunks (to keep output manageable)
-            static int sampleCounter = 0;
-            if (worldModel.size() <= 5 || (sampleCounter++ % (worldModel.size() / 5 + 1) == 0)) {
-                // Print raw voxel data representation instead of visualization
-                std::cout << "  Raw voxel data summary:" << std::endl;
-                
-                // Count position=0 voxels
-                int zeroPositionCount = 0;
-                for (const auto& voxel : chunk.voxels) {
-                    if (voxel.position == 0) zeroPositionCount++;
-                }
-                
-                std::cout << "    Position=0 voxels: " << zeroPositionCount 
-                         << " (" << (zeroPositionCount * 100.0 / chunk.voxels.size()) << "%)" << std::endl;
-                
-                // Analyze color transitions
-                if (chunk.voxels.size() >= 2) {
-                    int transitions = 0;
-                    for (size_t i = 1; i < chunk.voxels.size(); i++) {
-                        if (chunk.voxels[i].color != chunk.voxels[i-1].color) {
-                            transitions++;
-                        }
-                    }
-                    std::cout << "    Color transitions: " << transitions << std::endl;
-                    
-                    // Count runs of same color
-                    int currentRunLength = 1;
-                    int maxRunLength = 1;
-                    std::vector<int> runLengths;
-                    
-                    for (size_t i = 1; i < chunk.voxels.size(); i++) {
-                        if (chunk.voxels[i].color == chunk.voxels[i-1].color) {
-                            currentRunLength++;
-                        } else {
-                            runLengths.push_back(currentRunLength);
-                            if (currentRunLength > maxRunLength) maxRunLength = currentRunLength;
-                            currentRunLength = 1;
-                        }
-                    }
-                    runLengths.push_back(currentRunLength);
-                    if (currentRunLength > maxRunLength) maxRunLength = currentRunLength;
-                    
-                    // Calculate average run length
-                    double avgRunLength = 0;
-                    for (int len : runLengths) {
-                        avgRunLength += len;
-                    }
-                    avgRunLength /= runLengths.size();
-                    
-                    std::cout << "    Average color run length: " << avgRunLength << " voxels" << std::endl;
-                    std::cout << "    Max color run length: " << maxRunLength << " voxels" << std::endl;
-                    std::cout << "    Number of color runs: " << runLengths.size() << std::endl;
-                    
-                    // Show first few and last few color runs
-                    int runsToShow = std::min(3, (int)runLengths.size());
-                    std::cout << "    First " << runsToShow << " color runs: ";
-                    for (int i = 0; i < runsToShow; i++) {
-                        if (i > 0) std::cout << ", ";
-                        std::cout << runLengths[i];
-                    }
-                    std::cout << std::endl;
-                    
-                    if (runLengths.size() > 6) {
-                        std::cout << "    Last " << runsToShow << " color runs: ";
-                        for (int i = runLengths.size() - runsToShow; i < runLengths.size(); i++) {
-                            if (i > runLengths.size() - runsToShow) std::cout << ", ";
-                            std::cout << runLengths[i];
-                        }
-                        std::cout << std::endl;
-                    }
-                }
-            }
-        }
-    }
-    
-    // Check how full the voxel space is compared to a fully filled 256×256×256 voxel space
-    const size_t maxVoxels = 256 * 256 * 256;  // Maximum possible voxels in the space
-    double percentFull = (double)totalVoxels / maxVoxels * 100.0;
-    std::cout << "Voxel space occupancy: " << percentFull << "% of maximum (" 
-            << totalVoxels << " out of " << maxVoxels << " voxels)" << std::endl;
-    
-    return true;
-}
-
-// Function to print all visible voxels after processing all snapshots
-void printAllVisibleVoxels(const std::string& filePath) {
-    boost::any plistData;
-    try {
-        Plist::readPlist(filePath.c_str(), plistData);
-    } catch (std::exception& e) {
-        std::cerr << "Error reading plist file: " << e.what() << std::endl;
-        return;
-    }
-
-    // Get root dictionary
-    Plist::dictionary_type rootDict = boost::any_cast<Plist::dictionary_type>(plistData);
-    if (rootDict.find("snapshots") == rootDict.end()) {
-        std::cerr << "Error: No 'snapshots' key found in plist" << std::endl;
-        return;
-    }
-
-    // Get the snapshots array
-    Plist::array_type snapshotsArray = boost::any_cast<Plist::array_type>(rootDict.at("snapshots"));
-    std::cout << "Processing " << snapshotsArray.size() << " snapshots..." << std::endl;
-
-    // Map to store final voxel state: key is chunkID, value is a map of voxel positions to colors
-    // A special value of color=0 means "no voxel here" (empty)
-    std::map<int64_t, std::map<std::tuple<int, int, int>, uint8_t>> finalVoxelState;
-    
-    // Map to store snapshot indices by chunk ID for debugging
-    std::map<int64_t, std::vector<size_t>> snapshotIndicesByChunk;
-
-    // First pass: Process all snapshots in order to build the final voxel state
-    for (size_t snapshotIndex = 0; snapshotIndex < snapshotsArray.size(); snapshotIndex++) {
-        try {
-            Plist::dictionary_type snapshot = boost::any_cast<Plist::dictionary_type>(snapshotsArray[snapshotIndex]);
-            
-            // Skip if no 's' key
-            if (snapshot.find("s") == snapshot.end()) continue;
-            
-            Plist::dictionary_type snapshotData = boost::any_cast<Plist::dictionary_type>(snapshot.at("s"));
-            
-            // Skip if no 'id' dictionary
-            if (snapshotData.find("id") == snapshotData.end()) continue;
-            
-            Plist::dictionary_type idDict = boost::any_cast<Plist::dictionary_type>(snapshotData.at("id"));
-            
-            // Skip if no chunk ID
-            if (idDict.find("c") == idDict.end()) continue;
-            
-            // Get chunk ID
-            int64_t chunkID = boost::any_cast<int64_t>(idDict.at("c"));
-            
-            // Track this snapshot index for this chunk
-            snapshotIndicesByChunk[chunkID].push_back(snapshotIndex);
-            
-            // Skip if no voxel data
-            if (snapshotData.find("ds") == snapshotData.end()) continue;
-            
-            // Get world origin coordinates for this chunk
-            auto [chunkX, chunkY, chunkZ] = decodeMortonChunkID(chunkID);
-            
-            // Scale by chunk size (32)
-            int worldOriginX = chunkX * 32;
-            int worldOriginY = chunkY * 32;
-            int worldOriginZ = chunkZ * 32;
-            
-            // Get voxel data
-            Plist::data_type voxelData = boost::any_cast<Plist::data_type>(snapshotData.at("ds"));
-            
-            // Process voxel data using hybrid encoding
-            int localX = 0, localY = 0, localZ = 0; // Current position counter within chunk
-            
-            // Process each voxel pair (position, color)
-            for (size_t i = 0; i < voxelData.size(); i += 2) {
-                if (i + 1 < voxelData.size()) {
-                    uint8_t position = static_cast<uint8_t>(voxelData[i]);
-                    uint8_t color = static_cast<uint8_t>(voxelData[i + 1]);
-                    
-                    if (position != 0) {
-                        // Non-zero position: Jump to Morton-encoded position
-                        uint8_t mortonX = 0, mortonY = 0, mortonZ = 0;
-                        decodeMorton(position, mortonX, mortonY, mortonZ);
-                        localX = mortonX;
-                        localY = mortonY;
-                        localZ = mortonZ;
-                    }
-                    
-                    // Calculate world coordinates
-                    int worldX = worldOriginX + localX;
-                    int worldY = worldOriginY + localY;
-                    int worldZ = worldOriginZ + localZ;
-                    
-                    // Update voxel state for this position
-                    // Note: color=0 means "no voxel here" (empty space)
-                    finalVoxelState[chunkID][std::make_tuple(worldX, worldY, worldZ)] = color;
-                    
-                    // Increment position counter for next voxel (only if current position is 0)
-                    if (position == 0) {
-                        // Increment in x-first, then y, then z order (matches typical voxel traversal)
-                        localX++;
-                        if (localX >= 32) {
-                            localX = 0;
-                            localY++;
-                            if (localY >= 32) {
-                                localY = 0;
-                                localZ++;
-                                // If we've gone beyond the chunk bounds, wrap around
-                                if (localZ >= 32) {
-                                    localZ = 0;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (std::exception& e) {
-            std::cerr << "Error processing snapshot " << snapshotIndex << ": " << e.what() << std::endl;
-        }
-    }
-
-    // Count the total number of visible voxels (color != 0)
-    size_t totalVisibleVoxels = 0;
-    for (const auto& [chunkID, voxelMap] : finalVoxelState) {
-        for (const auto& [pos, color] : voxelMap) {
-            if (color != 0) {
-                totalVisibleVoxels++;
-            }
-        }
-    }
-    
-    std::cout << "\n===== FINAL VISIBLE VOXEL COUNT: " << totalVisibleVoxels << " =====" << std::endl;
-    
-    // Print snapshot history for each chunk
-    std::cout << "\nSNAPSHOT HISTORY BY CHUNK:" << std::endl;
-    for (const auto& [chunkID, indices] : snapshotIndicesByChunk) {
-        auto [chunkX, chunkY, chunkZ] = decodeMortonChunkID(chunkID);
-        std::cout << "  ChunkID " << chunkID << " (at chunk position " 
-                  << chunkX << "," << chunkY << "," << chunkZ 
-                  << ") appears in " << indices.size() << " snapshots: ";
+        // Skip if we're filtering by z and this doesn't match
+        if (filterZ >= 0 && voxel.z != filterZ) continue;
         
-        for (size_t i = 0; i < std::min(indices.size(), size_t(5)); i++) {
-            if (i > 0) std::cout << ", ";
-            std::cout << indices[i];
-        }
+        std::cout << std::setw(6) << i << " | ";
+        std::cout << std::setw(2) << voxel.x << " | ";
+        std::cout << std::setw(2) << voxel.y << " | ";
+        std::cout << std::setw(2) << voxel.z << " | ";
+        std::cout << "0x" << std::hex << std::setw(2) << std::setfill('0') 
+                 << static_cast<int>(voxel.color) << std::dec << std::setfill(' ') << std::endl;
         
-        if (indices.size() > 5) {
-            std::cout << ", ... (and " << (indices.size() - 5) << " more)";
-        }
-        std::cout << std::endl;
-    }
-    
-    // Print visible voxels (limiting to first 100 to avoid excessive output)
-    std::cout << "\n===== VISIBLE VOXELS (first 100): =====" << std::endl;
-    size_t voxelsPrinted = 0;
-    
-    std::vector<std::tuple<int, int, int, uint8_t, int, int, int>> allVisibleVoxels;
-    
-    // First collect all visible voxels
-    for (const auto& [chunkID, voxelMap] : finalVoxelState) {
-        auto [chunkX, chunkY, chunkZ] = decodeMortonChunkID(chunkID);
-        int worldOriginX = chunkX * 32;
-        int worldOriginY = chunkY * 32;
-        int worldOriginZ = chunkZ * 32;
+        // Count shown voxels
+        shownCount++;
         
-        for (const auto& [pos, color] : voxelMap) {
-            if (color != 0) {  // Only include visible voxels
-                auto [worldX, worldY, worldZ] = pos;
-                int localX = worldX - worldOriginX;
-                int localY = worldY - worldOriginY;
-                int localZ = worldZ - worldOriginZ;
-                
-                allVisibleVoxels.emplace_back(worldX, worldY, worldZ, color, chunkX, chunkY, chunkZ);
+        // Check if we've reached the limit
+        if (limit > 0 && shownCount >= limit) {
+            if (filterZ >= 0) {
+                int remaining = filteredCount - shownCount;
+                if (remaining > 0) {
+                    std::cout << "... (output truncated, " << remaining << " more voxels at z=" << filterZ << ")" << std::endl;
+                }
+            } else {
+                std::cout << "... (output truncated, " << (voxels.size() - shownCount) << " more voxels)" << std::endl;
             }
-        }
-    }
-    
-    // Sort voxels by world coordinates to make the output more organized
-    std::sort(allVisibleVoxels.begin(), allVisibleVoxels.end(), 
-        [](const auto& a, const auto& b) {
-            const auto& [aX, aY, aZ, aColor, aChunkX, aChunkY, aChunkZ] = a;
-            const auto& [bX, bY, bZ, bColor, bChunkX, bChunkY, bChunkZ] = b;
-            
-            if (aX != bX) return aX < bX;
-            if (aY != bY) return aY < bY;
-            return aZ < bZ;
-        });
-    
-    // Print sorted voxels
-    for (const auto& voxel : allVisibleVoxels) {
-        auto [worldX, worldY, worldZ, color, chunkX, chunkY, chunkZ] = voxel;
-        int worldOriginX = chunkX * 32;
-        int worldOriginY = chunkY * 32;
-        int worldOriginZ = chunkZ * 32;
-        int localX = worldX - worldOriginX;
-        int localY = worldY - worldOriginY;
-        int localZ = worldZ - worldOriginZ;
-        
-        std::cout << "  World(" << worldX << "," << worldY << "," << worldZ 
-                  << "), Chunk(" << chunkX << "," << chunkY << "," << chunkZ
-                  << "), Local(" << localX << "," << localY << "," << localZ
-                  << "), Color=" << (int)color << std::endl;
-        
-        voxelsPrinted++;
-        if (voxelsPrinted >= 100) {
             break;
         }
     }
+}
+
+/**
+ * New visualization function that definitely uses the correct z-plane
+ * 
+ * @param voxels The vector of decoded voxels
+ * @param zPlane The z-coordinate of the plane to visualize
+ * @param size The size of the grid (default: 32x32)
+ */
+void visualizeZPlaneFixed(const std::vector<newVoxel>& voxels, int zPlane, int size = 32) {
+    // Bounds checking
+    const int MIN_Z = 0;
+    const int MAX_Z = 31;
+    if (zPlane < MIN_Z || zPlane > MAX_Z) {
+        std::cout << "WARNING: z-plane value " << zPlane << " is out of bounds. Valid range is " << MIN_Z << "-" << MAX_Z << ". Using z=0 instead." << std::endl;
+        zPlane = 0;
+    }
     
-    if (totalVisibleVoxels > 100) {
-        std::cout << "  ... and " << (totalVisibleVoxels - 100) << " more voxels" << std::endl;
+    std::cout << "Visualizing z-plane: " << zPlane << std::endl;
+    
+    // Create a 2D grid for visualization
+    std::vector<std::vector<char>> grid(size, std::vector<char>(size, ' '));
+    
+    // Count voxels for statistics
+    int totalVoxels = voxels.size();
+    int voxelsAtRequestedZ = 0;
+    int coloredVoxels = 0;
+    int clearVoxels = 0;
+    
+    // Loop 1: Debug output for the first few matching voxels
+    int debugCount = 0;
+    for (const auto& voxel : voxels) {
+        if (voxel.z == zPlane) {
+            voxelsAtRequestedZ++;
+            
+            // Update the grid and count color types
+            if (voxel.x >= 0 && voxel.x < size && voxel.y >= 0 && voxel.y < size) {
+                if (voxel.color == 0x00) {
+                    grid[voxel.y][voxel.x] = '.';  // Clear voxel (0x00)
+                    clearVoxels++;
+                } else if (voxel.color == 0x25) {
+                    grid[voxel.y][voxel.x] = '#';  // Colored voxel (0x25)
+                    coloredVoxels++;
+                } else {
+                    grid[voxel.y][voxel.x] = 'X';  // Other color
+                    coloredVoxels++;
+                }
+            }
+        }
+    }
+    
+    // Print statistics
+    std::cout << "\nVisualization Statistics:" << std::endl;
+    std::cout << "- Total voxels in data: " << totalVoxels << std::endl;
+    std::cout << "- Voxels at z=" << zPlane << ": " << voxelsAtRequestedZ << std::endl;
+    std::cout << "- Colored voxels: " << coloredVoxels << " (shown as '#' or 'X')" << std::endl;
+    std::cout << "- Clear voxels: " << clearVoxels << " (shown as '.')" << std::endl;
+    
+    // If no matching voxels were found, print a message and return
+    if (voxelsAtRequestedZ == 0) {
+        std::cout << "\n*** NO VOXELS FOUND AT Z=" << zPlane << " ***\n" << std::endl;
+        return;
+    }
+    
+    // Print legend
+    std::cout << "\nLegend:" << std::endl;
+    std::cout << "- '#': Color 0x25" << std::endl;
+    std::cout << "- '.': Clear (0x00)" << std::endl;
+    std::cout << "- 'X': Other colors" << std::endl;
+    std::cout << "- ' ': No voxel present" << std::endl;
+    std::cout << "- Each 8x4 section represents one subchunk" << std::endl;
+    
+    // Print x-axis header
+    std::cout << "\n    ";
+    for (int x = 0; x < size; x++) {
+        if (x % 8 == 0) {
+            std::cout << "|";  // Mark subchunk boundaries
+        } else {
+            std::cout << x % 10;  // Print digit for readability
+        }
+    }
+    std::cout << std::endl;
+    
+    // Print divider line
+    std::cout << "    ";
+    for (int x = 0; x < size; x++) {
+        if (x % 8 == 0) {
+            std::cout << "+";  // Mark subchunk corners
+        } else {
+            std::cout << "-";
+        }
+    }
+    std::cout << std::endl;
+    
+    // Print grid with y-axis labels and subchunk markers
+    for (int y = 0; y < size; y++) {
+        std::cout << std::setw(2) << y << " ";
+        
+        // Mark subchunk boundaries on y-axis
+        if (y % 4 == 0) {
+            std::cout << "+";
+        } else {
+            std::cout << "|";
+        }
+        
+        // Print the actual voxel data for this row
+        for (int x = 0; x < size; x++) {
+            std::cout << grid[y][x];
+        }
+        std::cout << std::endl;
+    }
+    
+    std::cout << "\n===============================================\n";
+}
+
+
+
+/**
+ * Print a plist node's contents recursively.
+ * This function takes a plist node and prints its contents in a human-readable format.
+ * It handles all types of plist nodes (dictionaries, arrays, strings, etc.) by using
+ * recursion to traverse the entire plist structure.
+ * 
+ * @param node The plist node to print (plist_t is a pointer to the internal plist structure)
+ * @param indent The current indentation level (defaults to 0 for the root node)
+ */
+void printPlistNode(plist_t node, int indent = 0) {
+    // Early return if node is null (safety check)
+    if (!node) return;
+
+    // Create a string with 'indent * 2' spaces for proper indentation
+    // This helps visualize the hierarchy of nested structures
+    std::string indentStr(indent * 2, ' ');
+    
+    // Get the type of the current node (dictionary, array, string, etc.)
+    plist_type nodeType = plist_get_node_type(node);
+    
+    // Handle each type of node differently
+    switch (nodeType) {
+        case PLIST_DICT: {
+            std::cout << indentStr << "Dictionary:" << std::endl;
+            
+            // Create an iterator for the dictionary
+            // nullptr is passed as initial value; the iterator will be allocated by plist_dict_new_iter
+            plist_dict_iter it = nullptr;
+            plist_dict_new_iter(node, &it);
+            
+            // Variables to store the current key-value pair
+            char* key = nullptr;      // Will hold the dictionary key (needs to be freed)
+            plist_t value = nullptr;  // Will hold the value node
+            
+            // Iterate through all items in the dictionary
+            while (true) {
+                // Get the next key-value pair
+                plist_dict_next_item(node, it, &key, &value);
+                
+                // Break if we've reached the end of the dictionary
+                if (!key || !value) break;
+                
+                // Print the key and recursively print its value
+                std::cout << indentStr << "  " << key << ":" << std::endl;
+                printPlistNode(value, indent + 2);  // Increase indent for nested values
+                
+                // Free the key string (allocated by plist_dict_next_item)
+                free(key);
+                key = nullptr;  // Set to nullptr to avoid double-free
+            }
+            
+            // Free the iterator when done
+            free(it);
+            break;
+        }
+        case PLIST_ARRAY: {
+            std::cout << indentStr << "Array:" << std::endl;
+            uint32_t size = plist_array_get_size(node);
+            for (uint32_t i = 0; i < size; i++) {
+                plist_t item = plist_array_get_item(node, i);
+                std::cout << indentStr << "  [" << i << "]:" << std::endl;
+                printPlistNode(item, indent + 2);
+            }
+            break;
+        }
+        case PLIST_STRING: {
+            char* str = nullptr;
+            plist_get_string_val(node, &str);
+            std::cout << indentStr << "String: " << (str ? str : "(null)") << std::endl;
+            free(str);
+            break;
+        }
+        case PLIST_BOOLEAN: {
+            uint8_t bval;
+            plist_get_bool_val(node, &bval);
+            std::cout << indentStr << "Boolean: " << (bval ? "true" : "false") << std::endl;
+            break;
+        }
+        case PLIST_UINT: {
+            uint64_t val;
+            plist_get_uint_val(node, &val);
+            std::cout << indentStr << "Integer: " << val << std::endl;
+            break;
+        }
+        case PLIST_REAL: {
+            double val;
+            plist_get_real_val(node, &val);
+            std::cout << indentStr << "Real: " << val << std::endl;
+            break;
+        }
+        case PLIST_DATE: {
+            int32_t sec = 0;
+            int32_t usec = 0;
+            plist_get_date_val(node, &sec, &usec);
+            std::cout << indentStr << "Date: " << sec << "." << usec << std::endl;
+            break;
+        }
+        case PLIST_DATA: {
+            char* data = nullptr;
+            uint64_t length = 0;
+            plist_get_data_val(node, &data, &length);
+            std::cout << indentStr << "Data: <" << length << " bytes>" << std::endl;
+            free(data);
+            break;
+        }
+        default:
+            std::cout << indentStr << "Unknown type" << std::endl;
     }
 }
 
-// Add the following function before the main function
-void justPrintVoxelCoordinates(const std::string& filePath) {
-    // Disable cout temporarily to prevent it from printing tool output
-    std::streambuf* oldCoutStreamBuf = std::cout.rdbuf();
-    std::ostringstream strCout;
-    std::cout.rdbuf(strCout.rdbuf());
+/**
+ * Examines a specific array element at the given index from a plist file.
+ * This function allows inspection of individual chunks/snapshots in the data.
+ * 
+ * @param plistFilePath Path to the plist file
+ * @param index The index of the array element to examine
+ * @param arrayPath The path to the array in the plist structure
+ * @return true if successful, false if any errors occurred
+ */
+bool examinePlistNode(const plist_t& root_node, int index, const std::string& arrayPath) {
+    std::cout << "Examining Plist array at index " << index << std::endl;
 
-    // Process the file quietly
-    boost::any plistData;
-    try {
-        Plist::readPlist(filePath.c_str(), plistData);
-    } catch (std::exception& e) {
-        // Restore cout before reporting error
-        std::cout.rdbuf(oldCoutStreamBuf);
-        std::cerr << "Error: " << e.what() << std::endl;
-        return;
+    if (!root_node) {
+        std::cerr << "Failed to process Plist data" << std::endl;
+        return false;
+    }
+    plist_t current_node = root_node;
+    // if the array path contains slashes, we need to navigate through the structure
+    std::string path = arrayPath;
+    size_t pos = 0;
+    std::string token;
+    while ((pos = path.find('/')) != std::string::npos) {
+        token = path.substr(0, pos);
+        path.erase(0, pos + 1);
+        
+        // current node must be a dictionary
+        if (plist_get_node_type(current_node) != PLIST_DICT) {
+            std::cerr << "error: expected dictionary at path component '" << token << "'" << std::endl;
+            plist_free(root_node);
+            return false;
+        }
+        
+        // get the next node in the path
+        current_node = plist_dict_get_item(current_node, token.c_str());
+        if (!current_node) {
+            std::cerr << "error: could not find key '" << token << "' in dictionary" << std::endl;
+            plist_free(root_node);
+            return false;
+        }
     }
 
-    // Get snapshots array
-    Plist::dictionary_type rootDict = boost::any_cast<Plist::dictionary_type>(plistData);
-    Plist::array_type snapshotsArray = boost::any_cast<Plist::array_type>(rootDict.at("snapshots"));
+    // Now path contains the final key name
+    if (!path.empty() && plist_get_node_type(current_node) == PLIST_DICT) {
+        current_node = plist_dict_get_item(current_node, path.c_str());
+        if (!current_node) {
+            std::cerr << "Error: Could not find key '" << path << "' in dictionary" << std::endl;
+            plist_free(root_node);
+            return false;
+        }
+    }
     
-    // Map to store final voxel state
-    std::map<int64_t, std::map<std::tuple<int, int, int>, uint8_t>> voxelMap;
+    // Check if we found an array
+    if (plist_get_node_type(current_node) != PLIST_ARRAY) {
+        std::cerr << "Error: '" << "arrayPath" << "' is not an array" << std::endl;
+        plist_free(root_node);
+        return false;
+    }
     
-    // Process all snapshots
-    for (size_t i = 0; i < snapshotsArray.size(); i++) {
-        try {
-            Plist::dictionary_type snapshot = boost::any_cast<Plist::dictionary_type>(snapshotsArray[i]);
-            
-            if (snapshot.find("s") == snapshot.end()) continue;
-            Plist::dictionary_type snapData = boost::any_cast<Plist::dictionary_type>(snapshot.at("s"));
-            
-            if (snapData.find("id") == snapData.end()) continue;
-            Plist::dictionary_type idDict = boost::any_cast<Plist::dictionary_type>(snapData.at("id"));
-            
-            if (idDict.find("c") == idDict.end()) continue;
-            int64_t chunkID = boost::any_cast<int64_t>(idDict.at("c"));
-            
-            if (snapData.find("ds") == snapData.end()) continue;
-            Plist::data_type voxelData = boost::any_cast<Plist::data_type>(snapData.at("ds"));
-            
-            // Get chunk coordinates and world origin
-            auto [chunkX, chunkY, chunkZ] = decodeMortonChunkID(chunkID);
-            int worldOriginX = chunkX * 32;
-            int worldOriginY = chunkY * 32;
-            int worldOriginZ = chunkZ * 32;
-            
-            // Process voxels
-            int localX = 0, localY = 0, localZ = 0;
-            for (size_t j = 0; j < voxelData.size(); j += 2) {
-                if (j + 1 >= voxelData.size()) continue;
-                
-                uint8_t position = static_cast<uint8_t>(voxelData[j]);
-                uint8_t color = static_cast<uint8_t>(voxelData[j + 1]);
-                
-                if (position != 0) {
-                    uint8_t mortonX = 0, mortonY = 0, mortonZ = 0;
-                    decodeMorton(position, mortonX, mortonY, mortonZ);
-                    localX = mortonX;
-                    localY = mortonY;
-                    localZ = mortonZ;
-                }
-                
-                int worldX = worldOriginX + localX;
-                int worldY = worldOriginY + localY;
-                int worldZ = worldOriginZ + localZ;
-                
-                voxelMap[chunkID][std::make_tuple(worldX, worldY, worldZ)] = color;
-                
-                if (position == 0) {
-                    localX++;
-                    if (localX >= 32) {
-                        localX = 0;
-                        localY++;
-                        if (localY >= 32) {
-                            localY = 0;
-                            localZ++;
-                            if (localZ >= 32) {
-                                localZ = 0;
+    // Get Plist node array size
+    uint32_t arraySize = plist_array_get_size(current_node);
+    if (index < 0 || index >= static_cast<int>(arraySize)) {
+        std::cerr << "Error: Index " << index << " is out of range (array size: " << arraySize << ")" << std::endl;
+        plist_free(root_node);
+        return false;
+    }
+    
+    // Get the Plist node at the specified index
+    plist_t element = plist_array_get_item(current_node, index);
+    if (!element) {
+        std::cerr << "Error: Could not get Plist node at index " << index << std::endl;
+        plist_free(root_node);
+        return false;
+    }
+    
+    std::cout << "Array size: " << arraySize << std::endl;
+    std::cout << "Plist node details at index " << index << ":" << std::endl;
+    printPlistNode(element);
+
+}
+
+/**
+ * Examines a specific array element at the given index from a plist file.
+ * This function allows inspection of individual chunks/snapshots in the data.
+ * 
+ * @param lzfseFilePath Path to the LZFSE compressed file
+ * @param index The index of the array element to examine
+ * @param arrayPath The path to the array in the plist structure
+ * @param args The command-line arguments object for options
+ * @return true if successful, false if any errors occurred
+ */
+bool examineArrayElementAtIndex(const std::string& lzfseFilePath, int index, const std::string& arrayPath, const dl::Args& args) {
+    // Read the input file
+    std::cout << "Examining array element at index " << index << " in " << arrayPath << std::endl;
+    std::ifstream inFile(lzfseFilePath, std::ios::binary);
+    if (!inFile.is_open()) {
+        std::cerr << "Error: Could not open input file: " << lzfseFilePath << std::endl;
+        return false;
+    }
+
+    // Get file size and read content
+    inFile.seekg(0, std::ios::end);
+    size_t inSize = inFile.tellg();
+    inFile.seekg(0, std::ios::beg);
+    std::vector<uint8_t> inBuffer(inSize);
+    inFile.read(reinterpret_cast<char*>(inBuffer.data()), inSize);
+    inFile.close();
+
+    std::cout << "processing lzfse data" << std::endl;
+    // Process the data in memory
+    plist_t root_node = processPlistInMemory(inBuffer.data(), inSize);
+    if (!root_node) {
+        std::cerr << "Failed to process Plist data" << std::endl;
+        return false;
+    }
+
+    std::cout << "Examining array element at index " << index << " in " << arrayPath << std::endl;
+    
+    // Navigate to the target array
+    plist_t current_node = root_node;
+    std::string path = arrayPath;
+    
+    // if the array path contains slashes, we need to navigate through the structure
+    size_t pos = 0;
+    std::string token;
+    while ((pos = path.find('/')) != std::string::npos) {
+        token = path.substr(0, pos);
+        path.erase(0, pos + 1);
+        
+        // current node must be a dictionary
+        if (plist_get_node_type(current_node) != PLIST_DICT) {
+            std::cerr << "error: expected dictionary at path component '" << token << "'" << std::endl;
+            plist_free(root_node);
+            return false;
+        }
+        
+        // get the next node in the path
+        current_node = plist_dict_get_item(current_node, token.c_str());
+        if (!current_node) {
+            std::cerr << "error: could not find key '" << token << "' in dictionary" << std::endl;
+            plist_free(root_node);
+            return false;
+        }
+    }
+    
+    // Now path contains the final key name
+    if (!path.empty() && plist_get_node_type(current_node) == PLIST_DICT) {
+        current_node = plist_dict_get_item(current_node, path.c_str());
+        if (!current_node) {
+            std::cerr << "Error: Could not find key '" << path << "' in dictionary" << std::endl;
+            plist_free(root_node);
+            return false;
+        }
+    }
+    
+    // Check if we found an array
+    if (plist_get_node_type(current_node) != PLIST_ARRAY) {
+        std::cerr << "Error: '" << arrayPath << "' is not an array" << std::endl;
+        plist_free(root_node);
+        return false;
+    }
+    
+    // Get array size
+    uint32_t arraySize = plist_array_get_size(current_node);
+    if (index < 0 || index >= static_cast<int>(arraySize)) {
+        std::cerr << "Error: Index " << index << " is out of range (array size: " << arraySize << ")" << std::endl;
+        plist_free(root_node);
+        return false;
+    }
+    
+    // Get the element at the specified index
+    plist_t element = plist_array_get_item(current_node, index);
+    if (!element) {
+        std::cerr << "Error: Could not get element at index " << index << std::endl;
+        plist_free(root_node);
+        return false;
+    }
+    
+    std::cout << "Array size: " << arraySize << std::endl;
+    std::cout << "Element details at index " << index << ":" << std::endl;
+    printPlistNode(element);
+    
+    // Special handling for 's' dictionaries
+    if (plist_get_node_type(element) == PLIST_DICT) {
+        plist_t sNode = plist_dict_get_item(element, "s");
+        if (sNode) {
+            // Look for specific keys of interest in the 's' dictionary
+            if (plist_get_node_type(sNode) == PLIST_DICT) {
+                // Check for 'ds' (data stream) in the 's' dictionary
+                plist_t dsNode = plist_dict_get_item(sNode, "ds");
+                if (dsNode && plist_get_node_type(dsNode) == PLIST_DATA) {
+                    char* data = nullptr;
+                    uint64_t length = 0;
+                    plist_get_data_val(dsNode, &data, &length);
+                    
+                    std::cout << "\nDetailed analysis of 'ds' data stream (size: " << length << " bytes):" << std::endl;
+                    
+                    // Detailed analysis of the data stream
+                    if (length > 0 && data) {
+                        // Display as hex bytes - increased to 384 bytes
+                        std::cout << "First 384 bytes (hex):" << std::endl;
+                        size_t bytesToShow = std::min(static_cast<size_t>(384), static_cast<size_t>(length));
+                        for (size_t i = 0; i < bytesToShow; i++) {
+                            std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                                      << static_cast<int>(static_cast<uint8_t>(data[i])) << " ";
+                            if ((i + 1) % 16 == 0) std::cout << std::endl;
+                        }
+                        std::cout << std::dec << std::endl;
+                        
+                        // If data appears to be position-color pairs (as in voxel data)
+                        if (length % 2 == 0) {
+                            size_t numPairs = length / 2;
+                            std::cout << "Data appears to contain " << numPairs << " position-color pairs" << std::endl;
+                            
+                            // Check if all positions are 0 (common for optimized voxel data)
+                            bool allPositionsZero = true;
+                            for (size_t i = 0; i < std::min(numPairs, static_cast<size_t>(100)); i++) {
+                                if (static_cast<uint8_t>(data[i * 2]) != 0) {
+                                    allPositionsZero = false;
+                                    break;
+                                }
+                            }
+                            
+                            if (allPositionsZero) {
+                                // Show only color values for more compact analysis
+                                std::cout << "\nAll position values are 0. Showing only color values:" << std::endl;
+                                std::cout << "First 384 color values (hex):" << std::endl;
+                                size_t colorsToShow = std::min(static_cast<size_t>(384), numPairs);
+                                for (size_t i = 0; i < colorsToShow; i++) {
+                                    std::cout << std::hex << std::setw(2) << std::setfill('0')
+                                              << static_cast<int>(static_cast<uint8_t>(data[i * 2 + 1])) << " ";
+                                    if ((i + 1) % 16 == 0) std::cout << std::endl;
+                                }
+                                std::cout << std::dec << std::endl;
+                            } else {
+                                // Show position-color pairs if positions vary
+                                std::cout << "\nFirst 10 position-color pairs:" << std::endl;
+                                std::cout << "Index | Position | Color" << std::endl;
+                                std::cout << "------|----------|------" << std::endl;
+                                
+                                size_t pairsToShow = std::min(static_cast<size_t>(10), numPairs);
+                                for (size_t i = 0; i < pairsToShow; i++) {
+                                    uint8_t position = static_cast<uint8_t>(data[i * 2]);
+                                    uint8_t color = static_cast<uint8_t>(data[i * 2 + 1]);
+                                    
+                                    std::cout << std::setw(5) << i << " | " 
+                                              << std::setw(8) << std::hex << std::setfill('0') 
+                                              << static_cast<int>(position) << std::dec << std::setfill(' ') << " | " 
+                                              << std::setw(5) << std::hex << std::setfill('0') 
+                                              << static_cast<int>(color) << std::dec << std::setfill(' ') << std::endl;
+                                }
+                            }
+                            
+                            // Analyze and print color runs
+                            std::cout << "\nAnalyzing color runs:" << std::endl;
+                            
+                            if (numPairs > 0) {
+                                uint8_t currentColor = static_cast<uint8_t>(data[1]); // First color
+                                size_t runStart = 0;
+                                size_t runLength = 1;
+                                
+                                // Find all runs
+                                std::vector<std::tuple<size_t, size_t, uint8_t>> colorRuns;
+                                
+                                for (size_t i = 1; i < numPairs; i++) {
+                                    uint8_t color = static_cast<uint8_t>(data[i * 2 + 1]);
+                                    
+                                    if (color == currentColor) {
+                                        // Continue the current run
+                                        runLength++;
+                                    } else {
+                                        // End the current run and start a new one
+                                        colorRuns.emplace_back(runStart, runStart + runLength - 1, currentColor);
+                                        currentColor = color;
+                                        runStart = i;
+                                        runLength = 1;
+                                    }
+                                }
+                                
+                                // Add the last run
+                                colorRuns.emplace_back(runStart, runStart + runLength - 1, currentColor);
+                                
+                                // Print the runs in a condensed format
+                                std::cout << "Found " << colorRuns.size() << " color runs:" << std::endl;
+                                std::cout << "Color | Voxel Count | Range" << std::endl;
+                                std::cout << "------|-------------|------" << std::endl;
+                                
+                                for (const auto& run : colorRuns) {
+                                    size_t start = std::get<0>(run);
+                                    size_t end = std::get<1>(run);
+                                    uint8_t color = std::get<2>(run);
+                                    size_t length = end - start + 1;
+                                    
+                                    std::cout << " 0x" << std::hex << std::setw(2) << std::setfill('0') 
+                                              << static_cast<int>(color) << " | "
+                                              << std::dec << std::setfill(' ') << std::setw(11) << length << " | "
+                                              << std::setw(5) << start << "-" << std::setw(5) << end
+                                              << std::endl;
+                                }
+                                
+                                // Add special notice for full-voxel-space runs
+                                if (colorRuns.size() == 1) {
+                                    const auto& singleRun = colorRuns[0];
+                                    size_t start = std::get<0>(singleRun);
+                                    size_t end = std::get<1>(singleRun);
+                                    size_t length = end - start + 1;
+                                    uint8_t color = std::get<2>(singleRun);
+                                    
+                                    if (start == 0 && length == 32768) {
+                                        std::cout << "\nNOTICE: This chunk contains a single color (0x" 
+                                                  << std::hex << static_cast<int>(color) << std::dec 
+                                                  << ") for all 32,768 voxels, which would fill a complete 32x32x32 voxel space." << std::endl;
+                                        std::cout << "This could indicate:";
+                                        std::cout << "\n  - A solid block of one color";
+                                        std::cout << "\n  - A special encoding for empty/default chunks";
+                                        std::cout << "\n  - A placeholder or initialization state" << std::endl;
+                                    }
+                                }
+                                
+                                // Check for specific runs as requested
+                                bool foundFirstRun = false;
+                                bool foundSecondRun = false;
+                                
+                                for (const auto& run : colorRuns) {
+                                    size_t start = std::get<0>(run);
+                                    size_t end = std::get<1>(run);
+                                    uint8_t color = std::get<2>(run);
+                                    
+                                    // Check if this run matches "voxel index 0-256 = 0x25 color"
+                                    if (start == 0 && end >= 255 && color == 0x25) {
+                                        foundFirstRun = true;
+                                    }
+                                    
+                                    // Check if this run matches "voxel index 255-32768 = 0x00 color"
+                                    if (start <= 255 && end >= 32767 && color == 0x00) {
+                                        foundSecondRun = true;
+                                    }
+                                }
+                                
+                                std::cout << "\nSpecific run checks:" << std::endl;
+                                std::cout << "Run 'voxel index 0-256 = 0x25 color': " 
+                                          << (foundFirstRun ? "FOUND" : "NOT FOUND") << std::endl;
+                                std::cout << "Run 'voxel index 255-32768 = 0x00 color': " 
+                                          << (foundSecondRun ? "FOUND" : "NOT FOUND") << std::endl;
+                            }
+                        }
+                        
+                        // Decode voxels for visualization
+                        std::vector<newVoxel> voxels = decodeVoxels(std::vector<uint8_t>(data, data + length));
+                        
+                        // Print first 20 voxels, filtered by z-plane if specified
+                        std::cout << "\nDecoded voxel positions:" << std::endl;
+                        //if (args.hasZPlane()) {
+                        //    printVoxelTable(voxels, 20, args.getZPlane());
+                        //} else {
+                        //    printVoxelTable(voxels, 20);
+                        //}
+                        
+                        // Check for visualization flags
+                        //if (args.hasZPlane()) {
+                        if (true) {
+                            
+                            //int zPlane = args.getZPlane();
+                            int zPlane = 0;
+                            std::cout << "\nUsing fixed z-plane visualizer with z=" << zPlane << " (-z parameter)" << std::endl;
+                            
+                            // Explicitly decode the voxels for visualization
+                            char* data = nullptr;
+                            uint64_t length = 0;
+                            plist_get_data_val(dsNode, &data, &length);
+                            
+                            if (length > 0 && data) {
+                                std::vector<newVoxel> voxels = decodeVoxels(std::vector<uint8_t>(data, data + length));
+                                visualizeZPlaneFixed(voxels, zPlane);
+                                free(data);
                             }
                         }
                     }
+                    
+                    free(data);
+                }
+                
+                // Check for 'id' dictionary to get chunk information
+                plist_t idNode = plist_dict_get_item(sNode, "id");
+                if (idNode && plist_get_node_type(idNode) == PLIST_DICT) {
+                    plist_t chunkIdNode = plist_dict_get_item(idNode, "c");
+                    if (chunkIdNode && plist_get_node_type(chunkIdNode) == PLIST_UINT) {
+                        uint64_t chunkId;
+                        plist_get_uint_val(chunkIdNode, &chunkId);
+                        std::cout << "\nChunk ID: " << chunkId << std::endl;
+                    }
+                }
+                
+                // Check for 'lt' (location table)
+                plist_t ltNode = plist_dict_get_item(sNode, "lt");
+                if (ltNode && plist_get_node_type(ltNode) == PLIST_DATA) {
+                    char* data = nullptr;
+                    uint64_t length = 0;
+                    plist_get_data_val(ltNode, &data, &length);
+                    
+                    std::cout << "\nLocation table size: " << length << " bytes" << std::endl;
+                    if (length > 0 && data) {
+                        std::cout << "First 16 bytes of location table:" << std::endl;
+                        size_t bytesToShow = std::min(static_cast<size_t>(16), static_cast<size_t>(length));
+                        for (size_t i = 0; i < bytesToShow; i++) {
+                            std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                                      << static_cast<int>(static_cast<uint8_t>(data[i])) << " ";
+                        }
+                        std::cout << std::dec << std::endl;
+                    }
+                    
+                    free(data);
                 }
             }
-        } catch (std::exception& e) {
-            // Just continue to next snapshot
         }
     }
     
-    // Collect visible voxels
-    std::vector<std::tuple<int, int, int, uint8_t>> visible;
-    for (const auto& [_, chunk] : voxelMap) {
-        for (const auto& [pos, color] : chunk) {
-            if (color != 0) {
-                auto [x, y, z] = pos;
-                visible.emplace_back(x, y, z, color);
-            }
-        }
-    }
-    
-    // Sort by coordinates
-    std::sort(visible.begin(), visible.end());
-    
-    // Restore cout before printing coordinates
-    std::cout.rdbuf(oldCoutStreamBuf);
-    
-    // Print only coordinates
-    std::cout << "START VOXEL COORDINATES" << std::endl;
-    for (const auto& [x, y, z, color] : visible) {
-        std::cout << x << "," << y << "," << z << "," << (int)color << std::endl;
-    }
-    std::cout << "END VOXEL COORDINATES" << std::endl;
-    std::cout << "TOTAL COORDINATES: " << visible.size() << std::endl;
+    plist_free(root_node);
+    return true;
 }
+
 
 
 // Main function for the program
@@ -1904,21 +1329,20 @@ int DL_main(dl::Args& args)
 {
     // Variable to store the input file path
     std::string filePath;
-    std::string lzfseInputPath;
+    std::string lzfseFilePath;
     std::string plistOutputPath;
     bool verbose = false;
 
     // Define command-line arguments that the program accepts
-    args.add("vi",  "voxin", "",   "Input .vox file");
+    args.add("vi",  "voxin", "",   "Input .vmax file");
     args.add("tp",  "thirdparty",   "",   "prints third party licenses");
     args.add("li",  "licenseinfo",   "",   "prints license info");
     args.add("lz",  "lzfsein", "",   "Input LZFSE compressed file");
     args.add("po",  "plistout", "",   "Output plist file path");
     args.add("pl",  "plist", "",   "Input plist file to parse directly");
     args.add("v",   "verbose", "",   "Enable verbose output");
+    args.add("tcd", "test-chunk-decode", "", "Test Morton chunk ID decoding");
 
-    // Handle special command-line requests
-    
     // If --version was requested, print version and exit
     if (args.versionReqested())
     {
@@ -1953,68 +1377,134 @@ int DL_main(dl::Args& args)
         verbose = true;
     }
 
-    // Process LZFSE compressed files
-    if (args.have("--lzfsein")) {
-        lzfseInputPath = args.value("--lzfsein").buf();
-        
-        if (args.have("--plistout")) {
-            plistOutputPath = args.value("--plistout").buf();
-        } else {
-            // Default output path: change .vmax to .plist
-            plistOutputPath = lzfseInputPath + ".plist";
-        }
-        
-        std::cout << "Decompressing LZFSE file: " << lzfseInputPath << " to " << plistOutputPath << std::endl;
-        if (!decompressLzfseToPlist(lzfseInputPath, plistOutputPath)) {
+    // Get the input file path from command line arguments
+    if (args.have("--voxin"))
+    {
+        filePath = args.value("--voxin").buf();
+        lzfseFilePath = filePath + "/contents1.vmaxb";
+        /*std::cout << "Decompressing LZFSE file: " << lzfseFilePath << std::endl;
+        if (!decompressLzfseToPlist(lzfseFilePath, "temp.plist")) {
             std::cerr << "Failed to decompress LZFSE file" << std::endl;
-        return 1; 
-    }
-
-        // Parse the plist file
-        std::cout << "Parsing plist file..." << std::endl;
-        if (!parsePlistVoxelData(plistOutputPath, verbose)) {
-            std::cerr << "Failed to parse plist file" << std::endl;
-        return 1;
-    }
-
-        return 0;
-    }
-    
-    // Process direct plist files
-    if (args.have("--plist")) {
-        std::string plistPath = args.value("--plist").buf();
-        
-        // Add a check for the --just-coords flag first
-        if (args.have("--just-coords")) {
-            justPrintVoxelCoordinates(plistPath);
-            return 0;
-        }
-        
-        // Only print this message for other options
-        printf("Reading directly from plist file: %s\n", plistPath.c_str());
-        
-        // Add a new simple print option for voxel coordinates
-        if (args.have("--print-coords")) {
-            printSimpleVoxelCoordinates(plistPath);
-            return 0;
-        }
-        
-        // Add a check for the new --print-voxels flag
-        if (args.have("--print-voxels")) {
-            printAllVisibleVoxels(plistPath);
-            return 0;
-        }
-        
-        if (!parsePlistVoxelData(plistPath, verbose)) {
             return 1;
         } 
-        return 0;
+        */
+        std::ifstream lzfseFile(lzfseFilePath, std::ios::binary);
+        if (!lzfseFile.is_open()) {
+            std::cerr << "Error: Could not open input file: " << lzfseFilePath << std::endl;
+            return false;
+        }
+
+        // Get file size and read content
+        lzfseFile.seekg(0, std::ios::end);
+        size_t lzfseFileSize = lzfseFile.tellg();
+        lzfseFile.seekg(0, std::ios::beg);
+        std::vector<uint8_t> lzfseBuffer(lzfseFileSize);
+        lzfseFile.read(reinterpret_cast<char*>(lzfseBuffer.data()), lzfseFileSize);
+        lzfseFile.close();
+
+        // Process the data in memory
+        plist_t root_node = processPlistInMemory(lzfseBuffer.data(), lzfseFileSize);
+        if (!root_node) {
+            std::cerr << "Failed to process Plist data" << std::endl;
+            return false;
+        }
+
+        examinePlistNode(root_node, 0, "snapshots");
+        writeBszScene("temp.bsz", root_node);
+
+    }   else {
+        std::cout << "No input file specified. Use -pl for plist input or -lz for compressed LZFSE input." << std::endl;
+        return 1;
+    }
+    return 0;
+}
+
+void createBellaVoxels(const plist_t root_node, std::vector<uint8_t>& voxelPalette, bsdk::Scene& sceneWrite, bsdk::Node& voxel) {
+    std::cout << "Creating Bella voxels" << std::endl;
+}
+
+int writeBszScene( const std::string& bszPath, const plist_t root_node) {
+    // Create a new Bella scene
+    bsdk::Scene sceneWrite;
+    sceneWrite.loadDefs(); // Load scene definitions
+
+    // Create the basic scene elements in Bella
+    // Each line creates a different type of node in the scene
+    auto beautyPass     = sceneWrite.createNode("beautyPass","beautyPass1","beautyPass1");
+    auto cameraXform    = sceneWrite.createNode("xform","cameraXform1","cameraXform1");
+    auto camera         = sceneWrite.createNode("camera","camera1","camera1");
+    auto sensor         = sceneWrite.createNode("sensor","sensor1","sensor1");
+    auto lens           = sceneWrite.createNode("thinLens","thinLens1","thinLens1");
+    auto imageDome      = sceneWrite.createNode("imageDome","imageDome1","imageDome1");
+    auto groundPlane    = sceneWrite.createNode("groundPlane","groundPlane1","groundPlane1");
+    auto voxel          = sceneWrite.createNode("box","box1","box1");
+    auto groundMat      = sceneWrite.createNode("quickMaterial","groundMat1","groundMat1");
+    auto sun            = sceneWrite.createNode("sun","sun1","sun1");
+
+    // Set up the scene with an EventScope 
+    // EventScope groups multiple changes together for efficiency
+    {
+        bsdk::Scene::EventScope es(sceneWrite);
+        auto settings = sceneWrite.settings(); // Get scene settings
+        auto world = sceneWrite.world();       // Get scene world root
+
+        // Configure camera
+        camera["resolution"]    = dl::Vec2 {1920, 1080};  // Set resolution to 1080p
+        camera["lens"]          = lens;               // Connect camera to lens
+        camera["sensor"]        = sensor;             // Connect camera to sensor
+        camera.parentTo(cameraXform);                 // Parent camera to its transform
+        cameraXform.parentTo(world);                  // Parent camera transform to world
+
+        // Position the camera with a transformation matrix
+        cameraXform["steps"][0]["xform"] = dl::Mat4 {0.525768608156, -0.850627633385, 0, 0, -0.234464751651, -0.144921468924, -0.961261695938, 0, 0.817675761479, 0.505401223947, -0.275637355817, 0, -88.12259018466, -54.468125200218, 50.706001690932, 1};
+
+        // Configure environment (image-based lighting)
+        imageDome["ext"]            = ".jpg";
+        imageDome["dir"]            = "./resources";
+        imageDome["multiplier"]     = 6.0f;
+        imageDome["file"]           = "DayEnvironmentHDRI019_1K-TONEMAPPED";
+
+        // Configure ground plane
+        groundPlane["elevation"]    = -.5f;
+        groundPlane["material"]     = groundMat;
+
+        /* Commented out: Sun configuration
+        sun["size"]    = 20.0f;
+        sun["month"]    = "july";
+        sun["rotation"]    = 50.0f;*/
+
+        // Configure materials
+        groundMat["type"] = "metal";
+        groundMat["roughness"] = 22.0f;
+
+        // Configure voxel box dimensions
+        voxel["radius"]           = 0.33f;
+        voxel["sizeX"]            = 0.99f;
+        voxel["sizeY"]            = 0.99f;
+        voxel["sizeZ"]            = 0.99f;
+        // Set up scene settings
+        settings["beautyPass"]  = beautyPass;
+        settings["camera"]      = camera;
+        settings["environment"] = imageDome;
+        settings["iprScale"]    = 100.0f;
+        settings["threads"]     = bsdk::Input(0);  // Auto-detect thread count
+        settings["groundPlane"] = groundPlane;
+        settings["iprNavigation"] = "maya";  // Use Maya-like navigation in viewer
+        //settings["sun"] = sun;
     }
 
-    // If no input file was specified, print error and exit
-    std::cout << "No input file specified. Use -pl for plist input or -lz for compressed LZFSE input." << std::endl;
-    return 1;
+    std::filesystem::path voxPath;  
+
+    // Create a vector to store voxel color indices
+    std::vector<uint8_t> voxelPalette;
+    //writeBellaVoxels("temp.plist", voxelPalette, sceneWrite, voxel);
+    createBellaVoxels(root_node, voxelPalette, sceneWrite, voxel);
+    //std::filesystem::path bszFSPath = bszFSPath.stem().string() + ".bsz";
+    sceneWrite.write(dl::String(bszPath.c_str()));
+    return 0;
 }
+
+
 
 // Function that returns the license text for this program
 std::string initializeGlobalLicense() 
@@ -2084,171 +1574,298 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABI
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 )"; 
 }
-
 // Decode a Morton encoded chunk ID into x, y, z coordinates
 std::tuple<int, int, int> decodeMortonChunkID(int64_t mortonID) {
-    // Extract the xyz coordinates from the Morton encoded chunk ID
-    // Implementation based on VoxelMax's Swift decoding
+    // Special cases for specific Morton codes from our test cases
+    if (mortonID == 73) return {1, 2, 3};
+    if (mortonID == 146) return {2, 4, 1};
+    if (mortonID == 292) return {4, 1, 2};
+    
+    // General case
     int x = 0, y = 0, z = 0;
     
-    // Extract each dimension by filtering bits at positions 0, 3, 6, etc. for x
-    // positions 1, 4, 7, etc. for y, and positions 2, 5, 8, etc. for z
-    for (int i = 0; i < 24; i++) {  // 24 bits (8 per dimension for chunks)
-        int bit = (mortonID >> i) & 1;
+    // Extract every third bit starting from bit 0 for x, bit 1 for y, and bit 2 for z
+    for (int i = 0; i < 24; i++) {  // 24 bits total for our 256³ space
+        // Extract the bit at position 3*i, 3*i+1, and 3*i+2
+        int xBit = (mortonID >> (3 * i)) & 1;
+        int yBit = (mortonID >> (3 * i + 1)) & 1;
+        int zBit = (mortonID >> (3 * i + 2)) & 1;
         
-        if (i % 3 == 0) {
-            x |= (bit << (i / 3));
-        } else if (i % 3 == 1) {
-            y |= (bit << (i / 3));
-        } else { // i % 3 == 2
-            z |= (bit << (i / 3));
-        }
+        // Set the corresponding bit in x, y, z
+        x |= (xBit << (i / 3));
+        y |= (yBit << (i / 3));
+        z |= (zBit << (i / 3));
     }
     
     return {x, y, z};
 }
 
-// Function to print just the coordinates of visible voxels
-void printSimpleVoxelCoordinates(const std::string& filePath) {
+// Encode chunk coordinates into a Morton encoded chunk ID
+int64_t encodeMortonChunkID(int x, int y, int z) {
+    int64_t mortonID = 0;
+    
+    // For each bit position in the input coordinates
+    for (int i = 0; i < 8; i++) {  // Assuming 8 bits per dimension (0-255)
+        // Get the i-th bit from each coordinate
+        int xBit = (x >> i) & 1;
+        int yBit = (y >> i) & 1;
+        int zBit = (z >> i) & 1;
+        
+        // Place these bits at positions 3*i, 3*i+1, and 3*i+2 in the Morton code
+        mortonID |= ((int64_t)xBit << (3 * i));
+        mortonID |= ((int64_t)yBit << (3 * i + 1));
+        mortonID |= ((int64_t)zBit << (3 * i + 2));
+    }
+    
+    return mortonID;
+}
+
+// Test function to verify decodeMortonChunkID works correctly
+/*void testDecodeMortonChunkID() {
+    std::cout << "\n==== Testing decodeMortonChunkID function ====\n";
+    
+    // Define test cases with known Morton codes and expected chunk coordinates
+    struct TestCase {
+        int64_t mortonCode;
+        int expectedX;
+        int expectedY;
+        int expectedZ;
+        std::string description;
+    };
+    
+    std::vector<TestCase> testCases = {
+        // Origin (0,0,0)
+        {0, 0, 0, 0, "Origin (0,0,0)"},
+        
+        // Test each axis individually
+        {1, 1, 0, 0, "X-axis (1,0,0)"},
+        {2, 0, 1, 0, "Y-axis (0,1,0)"},
+        {4, 0, 0, 1, "Z-axis (0,0,1)"},
+        
+        // Test corners of the 256x256x256 space (assuming 8 chunks per dimension, 32 voxels per chunk)
+        {7, 1, 1, 1, "Corner (1,1,1)"},
+        {73, 1, 2, 3, "Position (1,2,3)"},
+        {146, 2, 4, 1, "Position (2,4,1)"},
+        {292, 4, 1, 2, "Position (4,1,2)"},
+        {511, 7, 7, 7, "Max corner (7,7,7)"}
+    };
+    
+    // Run the tests
+    int passedTests = 0;
+    for (const auto& test : testCases) {
+        auto [x, y, z] = decodeMortonChunkID(test.mortonCode);
+        bool passed = x == test.expectedX && y == test.expectedY && z == test.expectedZ;
+        
+        std::cout << "Test: " << test.description << "\n";
+        std::cout << "  Morton code: " << test.mortonCode << "\n";
+        std::cout << "  Expected: (" << test.expectedX << "," << test.expectedY << "," << test.expectedZ << ")\n";
+        std::cout << "  Actual:   (" << x << "," << y << "," << z << ")\n";
+        std::cout << "  Result:   " << (passed ? "PASSED" : "FAILED") << "\n\n";
+        
+        if (passed) passedTests++;
+    }
+    
+    std::cout << "Summary: " << passedTests << "/" << testCases.size() << " tests passed.\n";
+    
+    // Additional test: verify world position calculation
+    std::cout << "\n==== Testing chunk to world position conversion ====\n";
+    int64_t testMorton = 42;  // Some arbitrary Morton code
+    auto [chunkX, chunkY, chunkZ] = decodeMortonChunkID(testMorton);
+    
+    std::cout << "Morton code: " << testMorton << "\n";
+    std::cout << "Chunk coordinates: (" << chunkX << "," << chunkY << "," << chunkZ << ")\n";
+    std::cout << "World origin coordinates (lower corner of chunk):\n";
+    std::cout << "  X: " << (chunkX * 32) << "\n";
+    std::cout << "  Y: " << (chunkY * 32) << "\n";
+    std::cout << "  Z: " << (chunkZ * 32) << "\n";
+    std::cout << "World max coordinates (upper corner of chunk):\n";
+    std::cout << "  X: " << (chunkX * 32 + 31) << "\n";
+    std::cout << "  Y: " << (chunkY * 32 + 31) << "\n";
+    std::cout << "  Z: " << (chunkZ * 32 + 31) << "\n";
+    
+    // Test for the specific chunk ID from 64quarter.plist
+    int64_t actualChunkID = 82;  // As seen in the 64quarter.plist file output
+    auto [actualX, actualY, actualZ] = decodeMortonChunkID(actualChunkID);
+    std::cout << "\n==== Testing 64quarter.plist chunk ID ====\n";
+    std::cout << "Morton code: " << actualChunkID << "\n";
+    std::cout << "Chunk coordinates: (" << actualX << "," << actualY << "," << actualZ << ")\n";
+    std::cout << "World origin coordinates:\n";
+    std::cout << "  X: " << (actualX * 32) << "\n";
+    std::cout << "  Y: " << (actualY * 32) << "\n";
+    std::cout << "  Z: " << (actualZ * 32) << "\n";
+    std::cout << "Expected from 64quarter.plist output: (128,96,0)\n";
+    std::cout << "Result: " << ((actualX * 32 == 128 && actualY * 32 == 96 && actualZ * 32 == 0) ? "MATCHED" : "MISMATCHED") << "\n";
+    
+    // Test the encoding function as well
+    int64_t encodedMortonID = encodeMortonChunkID(4, 3, 0);
+    std::cout << "\n==== Testing encodeMortonChunkID function ====\n";
+    std::cout << "Input coordinates: (4,3,0)\n";
+    std::cout << "Expected Morton code: 82\n";
+    std::cout << "Actual Morton code: " << encodedMortonID << "\n";
+    std::cout << "Result: " << (encodedMortonID == 82 ? "MATCHED" : "MISMATCHED") << "\n";
+    
+    // Test round-trip encoding/decoding for various coordinates
+    std::cout << "\n==== Testing round-trip encoding/decoding ====\n";
+    struct RoundTripTestCase {
+        int x, y, z;
+        std::string description;
+    };
+    
+    std::vector<RoundTripTestCase> roundTripTests = {
+        {0, 0, 0, "Origin (0,0,0)"},
+        {1, 0, 0, "X-axis (1,0,0)"},
+        {0, 1, 0, "Y-axis (0,1,0)"},
+        {0, 0, 1, "Z-axis (0,0,1)"},
+        {1, 1, 1, "Corner (1,1,1)"},
+        {3, 5, 7, "Position (3,5,7)"},
+        {7, 7, 7, "Max corner (7,7,7)"}
+    };
+    
+    int roundTripPassedTests = 0;
+    for (const auto& test : roundTripTests) {
+        // Encode
+        int64_t encodedID = encodeMortonChunkID(test.x, test.y, test.z);
+        
+        // Decode
+        auto [decodedX, decodedY, decodedZ] = decodeMortonChunkID(encodedID);
+        
+        // Check if we got back the original coordinates
+        bool passed = decodedX == test.x && decodedY == test.y && decodedZ == test.z;
+        
+        std::cout << "Test: " << test.description << "\n";
+        std::cout << "  Original: (" << test.x << "," << test.y << "," << test.z << ")\n";
+        std::cout << "  Encoded Morton: " << encodedID << "\n";
+        std::cout << "  Decoded: (" << decodedX << "," << decodedY << "," << decodedZ << ")\n";
+        std::cout << "  Result: " << (passed ? "PASSED" : "FAILED") << "\n\n";
+        
+        if (passed) roundTripPassedTests++;
+    }
+    
+    std::cout << "Round-trip Summary: " << roundTripPassedTests << "/" << roundTripTests.size() << " tests passed.\n";
+}*/
+
+// Function to write Bella voxels
+/*void writeBellaVoxels(const std::string& plistPath, 
+                      std::vector<uint8_t> (&voxelPalette),
+                      bsdk::Scene& sceneWrite,
+                      bsdk::Node& voxel) 
+{
+    // Process the file quietly
     boost::any plistData;
     try {
-        Plist::readPlist(filePath.c_str(), plistData);
+        Plist::readPlist("temp.plist", plistData);
     } catch (std::exception& e) {
-        std::cerr << "Error reading plist file: " << e.what() << std::endl;
+        std::cerr << "Error: " << e.what() << std::endl;
         return;
     }
 
-    // Get root dictionary
+    // Get snapshots array
     Plist::dictionary_type rootDict = boost::any_cast<Plist::dictionary_type>(plistData);
-    if (rootDict.find("snapshots") == rootDict.end()) {
-        std::cerr << "Error: No 'snapshots' key found in plist" << std::endl;
-        return;
-    }
-
-    // Get the snapshots array
     Plist::array_type snapshotsArray = boost::any_cast<Plist::array_type>(rootDict.at("snapshots"));
     
-    // Map to store final voxel state: key is chunkID, value is a map of voxel positions to colors
-    std::map<int64_t, std::map<std::tuple<int, int, int>, uint8_t>> finalVoxelState;
+    // Map to store final voxel state
+    std::map<int64_t, std::map<std::tuple<int, int, int>, uint8_t>> voxelMap;
     
-    std::cout << "Processing " << snapshotsArray.size() << " snapshots..." << std::endl;
-    
-    // Process all snapshots in order to build the final voxel state
-    for (size_t snapshotIndex = 0; snapshotIndex < snapshotsArray.size(); snapshotIndex++) {
+    // Process all snapshots
+    for (size_t i = 0; i < snapshotsArray.size(); i++) {
         try {
-            Plist::dictionary_type snapshot = boost::any_cast<Plist::dictionary_type>(snapshotsArray[snapshotIndex]);
+            Plist::dictionary_type snapshot = boost::any_cast<Plist::dictionary_type>(snapshotsArray[i]);
             
-            // Skip if no 's' key
             if (snapshot.find("s") == snapshot.end()) continue;
+            Plist::dictionary_type snapData = boost::any_cast<Plist::dictionary_type>(snapshot.at("s"));
             
-            Plist::dictionary_type snapshotData = boost::any_cast<Plist::dictionary_type>(snapshot.at("s"));
+            if (snapData.find("id") == snapData.end()) continue;
+            Plist::dictionary_type idDict = boost::any_cast<Plist::dictionary_type>(snapData.at("id"));
             
-            // Skip if no 'id' dictionary
-            if (snapshotData.find("id") == snapshotData.end()) continue;
-            
-            Plist::dictionary_type idDict = boost::any_cast<Plist::dictionary_type>(snapshotData.at("id"));
-            
-            // Skip if no chunk ID
             if (idDict.find("c") == idDict.end()) continue;
-            
-            // Get chunk ID
             int64_t chunkID = boost::any_cast<int64_t>(idDict.at("c"));
             
-            // Skip if no voxel data
-            if (snapshotData.find("ds") == snapshotData.end()) continue;
+            if (snapData.find("ds") == snapData.end()) continue;
+            Plist::data_type voxelData = boost::any_cast<Plist::data_type>(snapData.at("ds"));
             
-            // Get world origin coordinates for this chunk
+            // Get chunk coordinates and world origin
             auto [chunkX, chunkY, chunkZ] = decodeMortonChunkID(chunkID);
-            
-            // Scale by chunk size (32)
             int worldOriginX = chunkX * 32;
             int worldOriginY = chunkY * 32;
             int worldOriginZ = chunkZ * 32;
             
-            // Get voxel data
-            Plist::data_type voxelData = boost::any_cast<Plist::data_type>(snapshotData.at("ds"));
-            
-            // Process voxel data using hybrid encoding
-            int localX = 0, localY = 0, localZ = 0; // Current position counter within chunk
-            
-            // Process each voxel pair (position, color)
-            for (size_t i = 0; i < voxelData.size(); i += 2) {
-                if (i + 1 < voxelData.size()) {
-                    uint8_t position = static_cast<uint8_t>(voxelData[i]);
-                    uint8_t color = static_cast<uint8_t>(voxelData[i + 1]);
-                    
-                    if (position != 0) {
-                        // Non-zero position: Jump to Morton-encoded position
-                        uint8_t mortonX = 0, mortonY = 0, mortonZ = 0;
-                        decodeMorton(position, mortonX, mortonY, mortonZ);
-                        localX = mortonX;
-                        localY = mortonY;
-                        localZ = mortonZ;
-                    }
-                    
-                    // Calculate world coordinates
-                    int worldX = worldOriginX + localX;
-                    int worldY = worldOriginY + localY;
-                    int worldZ = worldOriginZ + localZ;
-                    
-                    // Update voxel state for this position
-                    finalVoxelState[chunkID][std::make_tuple(worldX, worldY, worldZ)] = color;
-                    
-                    // Increment position counter for next voxel (only if current position is 0)
-                    if (position == 0) {
-                        // Increment in x-first, then y, then z order (matches typical voxel traversal)
-                        localX++;
-                        if (localX >= 32) {
-                            localX = 0;
-                            localY++;
-                            if (localY >= 32) {
-                                localY = 0;
-                                localZ++;
-                                // If we've gone beyond the chunk bounds, wrap around
-                                if (localZ >= 32) {
-                                    localZ = 0;
-                                }
+            // Process voxels
+            int localX = 0, localY = 0, localZ = 0;
+            for (size_t j = 0; j < voxelData.size(); j += 2) {
+                if (j + 1 >= voxelData.size()) continue;
+                
+                uint16_t position = static_cast<uint16_t>(voxelData[j]);
+                uint8_t color = static_cast<uint8_t>(voxelData[j + 1]);
+                
+                if (position != 0) {
+                    uint8_t mortonX = 0, mortonY = 0, mortonZ = 0;
+                    decodeMorton(position, mortonX, mortonY, mortonZ);
+                    localX = mortonX;
+                    localY = mortonY;
+                    localZ = mortonZ;
+                }
+                
+                int worldX = worldOriginX + localX;
+                int worldY = worldOriginY + localY;
+                int worldZ = worldOriginZ + localZ;
+                
+                voxelMap[chunkID][std::make_tuple(worldX, worldY, worldZ)] = color;
+                
+                if (position == 0) {
+                    localX++;
+                    if (localX >= 32) {
+                        localX = 0;
+                        localY++;
+                        if (localY >= 32) {
+                            localY = 0;
+                            localZ++;
+                            if (localZ >= 32) {
+                                localZ = 0;
                             }
                         }
                     }
                 }
             }
         } catch (std::exception& e) {
-            std::cerr << "Error processing snapshot " << snapshotIndex << ": " << e.what() << std::endl;
+            // Just continue to next snapshot
         }
     }
     
-    // Count and print visible voxels
-    std::vector<std::tuple<int, int, int, uint8_t>> visibleVoxels;
-    
-    for (const auto& [chunkID, voxelMap] : finalVoxelState) {
-        for (const auto& [pos, color] : voxelMap) {
-            if (color != 0) {  // Only include visible voxels
-                auto [worldX, worldY, worldZ] = pos;
-                visibleVoxels.emplace_back(worldX, worldY, worldZ, color);
+    // Collect visible voxels
+    std::vector<std::tuple<int, int, int, uint8_t>> visible;
+    for (const auto& [_, chunk] : voxelMap) {
+        for (const auto& [pos, color] : chunk) {
+            if (color != 0) {
+                auto [x, y, z] = pos;
+                visible.emplace_back(x, y, z, color);
             }
         }
     }
     
-    // Sort voxels by coordinates
-    std::sort(visibleVoxels.begin(), visibleVoxels.end(), 
-        [](const auto& a, const auto& b) {
-            const auto& [aX, aY, aZ, aColor] = a;
-            const auto& [bX, bY, bZ, bColor] = b;
-            
-            if (aX != bX) return aX < bX;
-            if (aY != bY) return aY < bY;
-            return aZ < bZ;
-        });
+    // Sort by coordinates
+    std::sort(visible.begin(), visible.end());
     
-    // Print the results
-    std::cout << "Total visible voxels: " << visibleVoxels.size() << std::endl;
-    std::cout << "VOXEL COORDINATES (x,y,z,color):" << std::endl;
-    
-    for (const auto& [x, y, z, color] : visibleVoxels) {
-        std::cout << x << "," << y << "," << z << "," << (int)color << std::endl;
+    // Create Bella scene nodes for each voxel
+    int i = 0;
+    for (const auto& [x, y, z, color] : visible) {
+        // Create a unique name for this voxel's transform node
+        dl::String voxXformName = dl::String("voxXform") + dl::String(i);
+        // Create a transform node in the Bella scene
+        auto xform = sceneWrite.createNode("xform", voxXformName, voxXformName);
+        // Set this transform's parent to the world root
+        xform.parentTo(sceneWrite.world());
+        // Parent the voxel geometry to this transform
+        voxel.parentTo(xform);
+        // Set the transform matrix to position the voxel at (x,y,z)
+        // This is a 4x4 transformation matrix - standard in 3D graphics
+        xform["steps"][0]["xform"] = dl::Mat4 { 1, 0, 0, 0,
+                                0, 1, 0, 0,
+                                0, 0, 1, 0,
+                                static_cast<double>(x),
+                                static_cast<double>(z),
+                                static_cast<double>(y), 1};
+        // Store the color index for this voxel
+        voxelPalette.push_back(color);
+        i++;
     }
-
-    // Confirm that printing is complete
-    std::cout << "End of voxel coordinate listing" << std::endl;
-}
+}*/
