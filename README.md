@@ -16,7 +16,7 @@ mkdir workdir
 git clone https://github.com/lzfse/lzfse
 mkdir -p lzfse/build
 cd lzfse/build
-/Applications/CMake.app/Contents/bin/cmake ..
+/Applications/CMake.app/Contents/bin/cmake -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" ..
 make -j4
 cd ../..
 mkdir homebrew
@@ -26,7 +26,8 @@ brew update --force --quiet
 brew install libtool autoconf automake
 git clone https://github.com/libimobiledevice/libplist
 cd libplist
-./autogen.sh
+export LDFLAGS="-install_name @rpath/libplist-2.0.4.dylib"
+./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
 cd ..
 git clone https://github.com/oomer/vmax2bella.git
