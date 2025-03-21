@@ -26,9 +26,11 @@ brew update --force --quiet
 brew install libtool autoconf automake
 git clone https://github.com/libimobiledevice/libplist
 cd libplist
-export LDFLAGS="-install_name @rpath/libplist-2.0.4.dylib"
+
 ./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
+cd src/.libs
+install_name_tool -id @rpath/libplist-2.0.4.dylib src/.libs/libplist-2.0.4.dylib
 cd ..
 git clone https://github.com/oomer/vmax2bella.git
 cd vmax2bella
