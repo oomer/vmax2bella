@@ -210,6 +210,12 @@ struct RGBA {
     unsigned char r, g, b, a;
 };
 
+static DL_FI dl::Float srgbToLinear( dl::Float value ) 
+{
+    return ( value <= 0.04045f ) ?
+           ( value * ( 1.0f/12.92f ) ) :
+           ( powf( ( value + 0.055f ) * ( 1.0f/1.055f ), 2.4f ) );
+}
 
 int writeBszScene( const std::string& bszPath, const plist_t root_node, const std::vector<RGBA> palette); 
 bool debugSnapshots(plist_t element, int snapshotIndex, int zIndex); 
@@ -1570,7 +1576,12 @@ void writeBellaVoxels(const plist_t& root_node,
             //dielectric["depth"] = 33.0f;
             
             // Set the material color (convert 0-255 values to 0.0-1.0 range)
-            voxMat["reflectance"] = dl::Rgba{ dR, dG, dB, dA };
+            voxMat["reflectance"] = dl::Rgba{ 
+                srgbToLinear(dR), 
+                srgbToLinear(dG), 
+                srgbToLinear(dB), 
+                dA 
+            };
         }
     }
 
