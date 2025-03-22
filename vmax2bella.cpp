@@ -1311,6 +1311,9 @@ int DL_main(dl::Args& args)
         filePath = args.value("--voxin").buf();
         lzfseFilePath = filePath + "/contents1.vmaxb";
         pngFilePath = filePath + "/palette1.png";
+        size_t lastDotPos = filePath.rfind('.');        
+        std::string bszName = filePath.substr(0, lastDotPos) + ".bsz";
+
         std::cout << "Decompressing LZFSE file: " << lzfseFilePath << std::endl;
         if (!decompressLzfseToPlist(lzfseFilePath, "temp.plist")) {
             std::cerr << "Failed to decompress LZFSE file" << std::endl;
@@ -1376,7 +1379,7 @@ int DL_main(dl::Args& args)
         }*/
 
         //examinePlistNode(root_node, 0, zIndex, "snapshots");
-        writeBszScene("temp.bsz", root_node, palette);
+        writeBszScene(bszName, root_node, palette);
 
         plist_free(root_node); 
 
@@ -1387,7 +1390,7 @@ int DL_main(dl::Args& args)
     return 0;
 }
 
-int writeBszScene( const std::string& bszPath, const plist_t root_node, const std::vector<RGBA> palette) {
+int writeBszScene( const std::string& bszName, const plist_t root_node, const std::vector<RGBA> palette) {
     // Create a new Bella scene
     bsdk::Scene sceneWrite;
     sceneWrite.loadDefs(); // Load scene definitions
@@ -1457,14 +1460,11 @@ int writeBszScene( const std::string& bszPath, const plist_t root_node, const st
         //settings["sun"] = sun;
     }
 
-    std::filesystem::path voxPath;  
 
     // Create a vector to store voxel color indices
     std::vector<uint8_t> voxelPalette;
     writeBellaVoxels(root_node, voxelPalette, sceneWrite, voxel, palette);
-    //std::filesystem::path bszFSPath = bszFSPath.stem().string() + ".bsz";
-    //sceneWrite.write(dl::String(bszPath.c_str()));
-    sceneWrite.write(dl::String("goo.bsz"));
+    sceneWrite.write(dl::String(bszName.c_str()));
     return 0;
 }
 
