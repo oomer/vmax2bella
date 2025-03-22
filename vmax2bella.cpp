@@ -189,6 +189,11 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 #include "lzfse.h"
 
 #include "../libplist/include/plist/plist.h" // Library for handling Apple property list files
+// Define STB_IMAGE_IMPLEMENTATION before including to create the implementation
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h" // We'll need to add this library
+
+
 
 // Namespaces allow you to use symbols from a library without prefixing them
 namespace bsdk = dl::bella_sdk;
@@ -200,32 +205,55 @@ bool has_palette = false;
 // and will be defined later in the file
 std::string initializeGlobalLicense();
 std::string initializeGlobalThirdPartyLicences();
-int writeBszScene( const std::string& bszPath, const plist_t root_node); 
+
+struct RGBA {
+    unsigned char r, g, b, a;
+};
+
+
+int writeBszScene( const std::string& bszPath, const plist_t root_node, const std::vector<RGBA> palette); 
 bool debugSnapshots(plist_t element, int snapshotIndex, int zIndex); 
 void writeBellaVoxels(const plist_t& root_node, 
                       std::vector<uint8_t> (&voxelPalette),
                       bsdk::Scene& sceneWrite,
-                      bsdk::Node& voxel);
+                      bsdk::Node& voxel,
+                      std::vector<RGBA> palette);
 
-// hardcoded MV palette
-unsigned int palette[256] = {
-    0x00000000, 0xffffffff, 0xffccffff, 0xff99ffff, 0xff66ffff, 0xff33ffff, 0xff00ffff, 0xffffccff, 0xffccccff, 0xff99ccff, 0xff66ccff, 0xff33ccff, 0xff00ccff, 0xffff99ff, 0xffcc99ff, 0xff9999ff,
-    0xff6699ff, 0xff3399ff, 0xff0099ff, 0xffff66ff, 0xffcc66ff, 0xff9966ff, 0xff6666ff, 0xff3366ff, 0xff0066ff, 0xffff33ff, 0xffcc33ff, 0xff9933ff, 0xff6633ff, 0xff3333ff, 0xff0033ff, 0xffff00ff,
-    0xffcc00ff, 0xff9900ff, 0xff6600ff, 0xff3300ff, 0xff0000ff, 0xffffffcc, 0xffccffcc, 0xff99ffcc, 0xff66ffcc, 0xff33ffcc, 0xff00ffcc, 0xffffcccc, 0xffcccccc, 0xff99cccc, 0xff66cccc, 0xff33cccc,
-    0xff00cccc, 0xffff99cc, 0xffcc99cc, 0xff9999cc, 0xff6699cc, 0xff3399cc, 0xff0099cc, 0xffff66cc, 0xffcc66cc, 0xff9966cc, 0xff6666cc, 0xff3366cc, 0xff0066cc, 0xffff33cc, 0xffcc33cc, 0xff9933cc,
-    0xff6633cc, 0xff3333cc, 0xff0033cc, 0xffff00cc, 0xffcc00cc, 0xff9900cc, 0xff6600cc, 0xff3300cc, 0xff0000cc, 0xffffff99, 0xffccff99, 0xff99ff99, 0xff66ff99, 0xff33ff99, 0xff00ff99, 0xffffcc99,
-    0xffcccc99, 0xff99cc99, 0xff66cc99, 0xff33cc99, 0xff00cc99, 0xffff9999, 0xffcc9999, 0xff999999, 0xff669999, 0xff339999, 0xff009999, 0xffff6699, 0xffcc6699, 0xff996699, 0xff666699, 0xff336699,
-    0xff006699, 0xffff3399, 0xffcc3399, 0xff993399, 0xff663399, 0xff333399, 0xff003399, 0xffff0099, 0xffcc0099, 0xff990099, 0xff660099, 0xff330099, 0xff000099, 0xffffff66, 0xffccff66, 0xff99ff66,
-    0xff66ff66, 0xff33ff66, 0xff00ff66, 0xffffcc66, 0xffcccc66, 0xff99cc66, 0xff66cc66, 0xff33cc66, 0xff00cc66, 0xffff9966, 0xffcc9966, 0xff999966, 0xff669966, 0xff339966, 0xff009966, 0xffff6666,
-    0xffcc6666, 0xff996666, 0xff666666, 0xff336666, 0xff006666, 0xffff3366, 0xffcc3366, 0xff993366, 0xff663366, 0xff333366, 0xff003366, 0xffff0066, 0xffcc0066, 0xff990066, 0xff660066, 0xff330066,
-    0xff000066, 0xffffff33, 0xffccff33, 0xff99ff33, 0xff66ff33, 0xff33ff33, 0xff00ff33, 0xffffcc33, 0xffcccc33, 0xff99cc33, 0xff66cc33, 0xff33cc33, 0xff00cc33, 0xffff9933, 0xffcc9933, 0xff999933,
-    0xff669933, 0xff339933, 0xff009933, 0xffff6633, 0xffcc6633, 0xff996633, 0xff666633, 0xff336633, 0xff006633, 0xffff3333, 0xffcc3333, 0xff993333, 0xff663333, 0xff333333, 0xff003333, 0xffff0033,
-    0xffcc0033, 0xff990033, 0xff660033, 0xff330033, 0xff000033, 0xffffff00, 0xffccff00, 0xff99ff00, 0xff66ff00, 0xff33ff00, 0xff00ff00, 0xffffcc00, 0xffcccc00, 0xff99cc00, 0xff66cc00, 0xff33cc00,
-    0xff00cc00, 0xffff9900, 0xffcc9900, 0xff999900, 0xff669900, 0xff339900, 0xff009900, 0xffff6600, 0xffcc6600, 0xff996600, 0xff666600, 0xff336600, 0xff006600, 0xffff3300, 0xffcc3300, 0xff993300,
-    0xff663300, 0xff333300, 0xff003300, 0xffff0000, 0xffcc0000, 0xff990000, 0xff660000, 0xff330000, 0xff0000ee, 0xff0000dd, 0xff0000bb, 0xff0000aa, 0xff000088, 0xff000077, 0xff000055, 0xff000044,
-    0xff000022, 0xff000011, 0xff00ee00, 0xff00dd00, 0xff00bb00, 0xff00aa00, 0xff008800, 0xff007700, 0xff005500, 0xff004400, 0xff002200, 0xff001100, 0xffee0000, 0xffdd0000, 0xffbb0000, 0xffaa0000,
-    0xff880000, 0xff770000, 0xff550000, 0xff440000, 0xff220000, 0xff110000, 0xffeeeeee, 0xffdddddd, 0xffbbbbbb, 0xffaaaaaa, 0xff888888, 0xff777777, 0xff555555, 0xff444444, 0xff222222, 0xff111111
-};
+std::vector<RGBA> readPaletteFromPNG(const std::string& filename) {
+    int width, height, channels;
+    
+    // Load the image with 4 desired channels (RGBA)
+    unsigned char* data = stbi_load(filename.c_str(), &width, &height, &channels, 4);
+    
+    if (!data) {
+        std::cerr << "Error loading PNG file: " << filename << std::endl;
+        return {};
+    }
+    
+    // Make sure the image is 256x1 as expected
+    if (width != 256 || height != 1) {
+        std::cerr << "Warning: Expected a 256x1 image, but got " << width << "x" << height << std::endl;
+    }
+    
+    // Create our palette array
+    std::vector<RGBA> palette;
+    
+    // Read each pixel (each pixel is 4 bytes - RGBA)
+    for (int i = 0; i < width; i++) {
+        RGBA color;
+        color.r = data[i * 4];
+        color.g = data[i * 4 + 1];
+        color.b = data[i * 4 + 2];
+        color.a = data[i * 4 + 3];
+        palette.push_back(color);
+    }
+    
+    // Free the image data
+    stbi_image_free(data);
+    
+    return palette;
+}
+
 
 /**
  * Converts a binary plist file to XML format.
@@ -246,9 +274,7 @@ bool convertPlistToXml(const plist_t& root_node, const std::string& xmlStr) {
         return false;
     }
     // Write the plist data in XML format
-    std::cout << "Writing XML plist: " << xmlStr << std::endl;
     plist_write_to_file(root_node, xmlStr.c_str(), PLIST_FORMAT_XML, PLIST_OPT_NONE);
-    std::cout << "Successfully saved " << xmlStr << std::endl;
     return true;
 }
 
@@ -551,39 +577,18 @@ std::string getSnapshotTypeName(int64_t typeId) {
  */
 std::vector<newVoxel> decodeVoxels(const std::vector<uint8_t>& dsData, int mortonOffset) {
     std::vector<newVoxel> voxels;
-
-    std::vector<dsVoxel> _vxVoxelData;
     for (int i = 0; i < dsData.size() - 1; i += 2) {
         dsVoxel _vxVoxel; // VoxelMax data
         _vxVoxel.layer = static_cast<int>(dsData[i]);
         _vxVoxel.color = static_cast<uint8_t>(dsData[i + 1]);
-        _vxVoxelData.push_back(_vxVoxel);
-    }
-
-    uint32_t index = 0;
-    for (uint32_t z = 0; z < 32; z++) {
-        for (uint32_t y = 0; y < 32; y++) {
-            for (uint32_t x = 0; x < 32; x++) {
-                if (index <= dsData.size()) { 
-                    uint32_t dx, dy, dz;
-                    //uint32_t morton = index;
-                    decodeMorton3DOptimized(index + mortonOffset, dx, dy, dz); // index IS the morton code
-                    newVoxel voxel = {dx, dy, dz, _vxVoxelData[index].color};
-                    voxels.push_back(voxel);
-                }
-                index++;
-            }
+        uint32_t dx, dy, dz;
+        decodeMorton3DOptimized(i/2 + mortonOffset, dx, dy, dz); // index IS the morton code
+        if (_vxVoxel.color != 0) {
+            newVoxel voxel = {dx, dy, dz, _vxVoxel.color};
+            voxels.push_back(voxel);
         }
+
     }
-    // Output voxel count by z-level
-    //std::cout << "\nCreated " << voxels.size() << " voxels in total:" << std::endl;
-    std::map<int, int> zCounts;
-    for (const auto& voxel : voxels) {
-        zCounts[voxel.z]++;
-    }
-    //for (const auto& [z, count] : zCounts) {
-    //    std::cout << "  Voxels at z=" << z << ": " << count << std::endl;
-    //}
     return voxels;
 }
 
@@ -880,8 +885,6 @@ void printPlistNode(const plist_t& node, int indent = 0) {
  * @return true if successful, false if any errors occurred
  */
 std::vector<plist_t> getAllSnapshots(const plist_t& root_node) {
-    std::cout << "Getting all snapshots" << std::endl;
-    
     std::vector<plist_t> snapshotChunks;
     if (!root_node) {
         std::cerr << "Failed to process Plist data" << std::endl;
@@ -1248,6 +1251,7 @@ int DL_main(dl::Args& args)
     // Variable to store the input file path
     std::string filePath;
     std::string lzfseFilePath;
+    std::string pngFilePath;
     std::string plistOutputPath;
     bool verbose = false;
 
@@ -1300,6 +1304,7 @@ int DL_main(dl::Args& args)
     {
         filePath = args.value("--voxin").buf();
         lzfseFilePath = filePath + "/contents1.vmaxb";
+        pngFilePath = filePath + "/palette1.png";
         std::cout << "Decompressing LZFSE file: " << lzfseFilePath << std::endl;
         if (!decompressLzfseToPlist(lzfseFilePath, "temp.plist")) {
             std::cerr << "Failed to decompress LZFSE file" << std::endl;
@@ -1320,6 +1325,15 @@ int DL_main(dl::Args& args)
         lzfseFile.read(reinterpret_cast<char*>(lzfseBuffer.data()), lzfseFileSize);
         lzfseFile.close();
 
+        auto palette = readPaletteFromPNG(pngFilePath);
+    
+        if (palette.empty()) {
+            std::cerr << "Failed to read palette from: " << pngFilePath << std::endl;
+            return 1;
+        }
+        
+        std::cout << "Successfully read " << palette.size() << " colors from palette." << std::endl;
+
         // Process the data in memory
         plist_t root_node = processPlistInMemory(lzfseBuffer.data(), lzfseFileSize);
         if (!root_node) {
@@ -1327,7 +1341,9 @@ int DL_main(dl::Args& args)
             return false;
         }
 
-        convertPlistToXml(root_node, "foo.xml");
+        //Debug to XML
+        //convertPlistToXml(root_node, "foo.xml");
+
         int zIndex = 0;
         if (args.have("--zdepth")) 
         {
@@ -1353,9 +1369,8 @@ int DL_main(dl::Args& args)
             //printVoxelTable(voxels, 100);
         }*/
 
-
         //examinePlistNode(root_node, 0, zIndex, "snapshots");
-        writeBszScene("temp.bsz", root_node);
+        writeBszScene("temp.bsz", root_node, palette);
 
         plist_free(root_node); 
 
@@ -1366,11 +1381,7 @@ int DL_main(dl::Args& args)
     return 0;
 }
 
-void createBellaVoxels(const plist_t root_node, std::vector<uint8_t>& voxelPalette, bsdk::Scene& sceneWrite, bsdk::Node& voxel) {
-    std::cout << "Creating Bella voxels" << std::endl;
-}
-
-int writeBszScene( const std::string& bszPath, const plist_t root_node) {
+int writeBszScene( const std::string& bszPath, const plist_t root_node, const std::vector<RGBA> palette) {
     // Create a new Bella scene
     bsdk::Scene sceneWrite;
     sceneWrite.loadDefs(); // Load scene definitions
@@ -1444,9 +1455,7 @@ int writeBszScene( const std::string& bszPath, const plist_t root_node) {
 
     // Create a vector to store voxel color indices
     std::vector<uint8_t> voxelPalette;
-    std::cout << "Writing Bella voxels" << std::endl;
-    writeBellaVoxels(root_node, voxelPalette, sceneWrite, voxel);
-    createBellaVoxels(root_node, voxelPalette, sceneWrite, voxel);
+    writeBellaVoxels(root_node, voxelPalette, sceneWrite, voxel, palette);
     //std::filesystem::path bszFSPath = bszFSPath.stem().string() + ".bsz";
     //sceneWrite.write(dl::String(bszPath.c_str()));
     sceneWrite.write(dl::String("goo.bsz"));
@@ -1528,9 +1537,9 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 void writeBellaVoxels(const plist_t& root_node, 
                       std::vector<uint8_t> (&voxelPalette),
                       bsdk::Scene& sceneWrite,
-                      bsdk::Node& voxel) 
+                      bsdk::Node& voxel,
+                      std::vector<RGBA> palette) 
 {
-
     // Get snapshots array
     std::vector<plist_t> snapshotsArray = getAllSnapshots(root_node);
     // Map to store final voxel state
@@ -1540,16 +1549,15 @@ void writeBellaVoxels(const plist_t& root_node,
     // Process all snapshots
     //for (size_t i = 0; i < snapshotsArray.size(); i++) {
 
-
+    //for(int i=255; i>=0; i--)
     for(int i=0; i<256; i++)
     {
-        // Extract RGBA components from the palette color
-        // Bit shifting and masking extracts individual byte components
-        uint8_t r = (palette[i] >> 0) & 0xFF;   // Red (lowest byte)
-        uint8_t g = (palette[i] >> 8) & 0xFF;   // Green (second byte)
-        uint8_t b = (palette[i] >> 16) & 0xFF;  // Blue (third byte)
-        uint8_t a = (palette[i] >> 24) & 0xFF;  // Alpha (highest byte)
-        
+
+        double dR = static_cast<double>(palette[i].r)/255.0;
+        double dG = static_cast<double>(palette[i].g)/255.0;
+        double dB = static_cast<double>(palette[i].b)/255.0;
+        double dA = static_cast<double>(palette[i].a)/255.0;
+
         // Create a unique material name
         dl::String nodeName = dl::String("voxMat") + dl::String(i);
         // Create an Oren-Nayar material (diffuse material model)
@@ -1562,10 +1570,7 @@ void writeBellaVoxels(const plist_t& root_node,
             //dielectric["depth"] = 33.0f;
             
             // Set the material color (convert 0-255 values to 0.0-1.0 range)
-            voxMat["reflectance"] = dl::Rgba{ static_cast<double>(r)/255.0,
-                                            static_cast<double>(g)/255.0,
-                                            static_cast<double>(b)/255.0,
-                                            static_cast<double>(a)/255.0};
+            voxMat["reflectance"] = dl::Rgba{ dR, dG, dB, dA };
         }
     }
 
@@ -1623,8 +1628,6 @@ void writeBellaVoxels(const plist_t& root_node,
                 plist_get_int_val(typeNode, &value);
                 typeID = value;
             }
-            std::cout << "Snapshot: " << snapshotCount << " - Type ID: " << typeID << std::endl;
-
 
             // Get the "c" item from idNode dictionary
             plist_t chunkNode = plist_dict_get_item(idNode, "c");
@@ -1649,14 +1652,9 @@ void writeBellaVoxels(const plist_t& root_node,
             if (exists) continue;
             usedChunkIDs.push_back(chunkID);
 
-
             // Get the "ds" item from snapNode dictionary
             plist_t dsNode = plist_dict_get_item(snapNode, "ds");
             if (!dsNode) continue; // Skip if "ds" key doesn't exist
-
-
-
-
 
             std::vector<newVoxel> voxels = getSnapshotVoxels(dsNode, _minw);
             //printVoxelTable(voxels, 100);
@@ -1697,8 +1695,10 @@ void writeBellaVoxels(const plist_t& root_node,
     
     // Collect visible voxels
     std::vector<std::tuple<int, int, int, uint8_t>> visible;
+    int foo=0;
     for (const auto& [_, chunk] : voxelMap) {
         for (const auto& [pos, color] : chunk) {
+            foo++;
             if (color != 0) {
                 auto [x, y, z] = pos;
                 visible.emplace_back(x, y, z, color);
@@ -1707,7 +1707,7 @@ void writeBellaVoxels(const plist_t& root_node,
     }
     
     // Sort by coordinates
-    std::sort(visible.begin(), visible.end());
+    //std::sort(visible.begin(), visible.end());
     
     // Create Bella scene nodes for each voxel
     int i = 0;
@@ -1730,7 +1730,7 @@ void writeBellaVoxels(const plist_t& root_node,
                                 static_cast<double>(y),
                                 static_cast<double>(z), 1};
         // Store the color index for this voxel
-        voxelPalette.push_back(color);
+        voxelPalette.push_back(color-1);
         i++;
     }
         // Assign materials to voxels based on their color indices
