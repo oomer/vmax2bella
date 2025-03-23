@@ -77,7 +77,7 @@ CXX_FLAGS          = $(COMMON_FLAGS) -std=c++17 -Wno-deprecated-declarations
 CPP_DEFINES        = -DNDEBUG=1 -DDL_USE_SHARED
 
 # Objects
-OBJECTS            = vmax2bella.o
+OBJECTS            = vmax2bella.o extra.o debug.o
 OBJECT_FILES       = $(patsubst %,$(OBJ_DIR)/%,$(OBJECTS))
 
 # Build rules
