@@ -40,7 +40,6 @@ git clone https://github.com/libimobiledevice/libplist
 cd libplist
 ./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
-cd src/.libs
 install_name_tool -id @rpath/libplist-2.0.4.dylib src/.libs/libplist-2.0.4.dylib
 cd ..
 git clone https://github.com/oomer/vmax2bella.git
