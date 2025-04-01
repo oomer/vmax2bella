@@ -1,13 +1,14 @@
 #pragma once
 
-#include <map>     // For std::map
-#include <set>     // For std::set
-#include <vector>  // For std::vector (you're already using this)
-#include <string>  // For std::string (you're already using this)
-#include <cstdint> // For uint8_t
-#include <fstream> // For std::ifstream and std::ofstream
-#include <iostream> // For std::cerr, std::cout
-#include <filesystem> // For std::filesystem functions
+// Standard C++ library includes - these provide essential functionality
+#include <map>          // For key-value pair data structures (maps)
+#include <set>          // For set data structure
+#include <vector>       // For dynamic arrays (vectors)
+#include <string>       // For std::string
+#include <cstdint>      // For fixed-size integer types (uint8_t, uint32_t, etc.)
+#include <fstream>      // For file operations (reading/writing files)
+#include <iostream>     // For input/output operations (cout, cin, etc.)
+#include <filesystem>   // For file system operations (directory handling, path manipulation)
 
 #include "../lzfse/src/lzfse.h"
 #include "../libplist/include/plist/plist.h" // Library for handling Apple property list files
@@ -19,12 +20,172 @@ using json = nlohmann::json;
 #define STB_IMAGE_IMPLEMENTATION
 #include "thirdparty/stb_image.h" // STB Image library
 
-struct VoxelRGBA {
+
+
+struct VmaxVector3 {
+    double x, y, z;
+};
+
+// Converts axis-angle rotation to Euler angles (in XYZ order)
+// Parameters:
+//   ax, ay, az: The axis vector to rotate around (doesn't need to be normalized)
+//   angle: The angle to rotate by (in radians)
+// Returns: Vector3 containing Euler angles (x=pitch, y=yaw, z=roll) in radians
+VmaxVector3 axisAngleToEulerXYZ(double ax, double ay, double az, double angle) {
+    // First normalize the axis
+    double length = sqrt(ax*ax + ay*ay + az*az);
+    if (length != 0) {
+        ax /= length;
+        ay /= length;
+        az /= length;
+    }
+    
+    // Compute sin and cos of angle
+    double s = sin(angle);
+    double c = cos(angle);
+    double t = 1.0 - c;
+    
+    // Build rotation matrix from axis-angle
+    // This is the Rodrigues' rotation formula
+    double m11 = t*ax*ax + c;
+    double m12 = t*ax*ay - s*az;
+    double m13 = t*ax*az + s*ay;
+    
+    double m21 = t*ax*ay + s*az;
+    double m22 = t*ay*ay + c;
+    double m23 = t*ay*az - s*ax;
+    
+    double m31 = t*ax*az - s*ay;
+    double m32 = t*ay*az + s*ax;
+    double m33 = t*az*az + c;
+    
+    // Convert rotation matrix to euler angles
+    VmaxVector3 euler;
+    
+    // Handle gimbal lock cases
+    if (m13 > 0.998) { // singularity at north pole
+        euler.y = atan2(m12, m22);
+        euler.x = M_PI/2;
+        euler.z = 0;
+    }
+    else if (m13 < -0.998) { // singularity at south pole
+        euler.y = atan2(m12, m22);
+        euler.x = -M_PI/2;
+        euler.z = 0;
+    }
+    else {
+        euler.x = asin(-m13);
+        euler.y = atan2(m23, m33);
+        euler.z = atan2(m12, m11);
+    }
+    
+    return euler;
+}
+
+// Structure to represent a 4x4 matrix for 3D transformations
+// The matrix is stored as a 2D array where m[i][j] represents row i, column j
+struct VmaxMatrix4x4 {
+    double m[4][4];
+    
+    // Constructor: Creates an identity matrix (1's on diagonal, 0's elsewhere)
+    // This is the default starting point for any transformation
+    VmaxMatrix4x4() {
+        for(int i = 0; i < 4; i++) {
+            for(int j = 0; j < 4; j++) {
+                m[i][j] = (i == j) ? 1.0 : 0.0;  // 1.0 on diagonal, 0.0 elsewhere
+            }
+        }
+    }
+    
+    // Matrix multiplication operator to combine transformations
+    // Returns: A new matrix that represents the combined transformation
+    VmaxMatrix4x4 operator*(const VmaxMatrix4x4& other) const {
+        VmaxMatrix4x4 result;
+        
+        // Perform matrix multiplication
+        for(int i = 0; i < 4; i++) {
+            for(int j = 0; j < 4; j++) {
+                result.m[i][j] = 0.0;
+                for(int k = 0; k < 4; k++) {
+                    result.m[i][j] += m[i][k] * other.m[k][j];
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    // Helper function to create a translation matrix
+    static VmaxMatrix4x4 createTranslation(double x, double y, double z) {
+        VmaxMatrix4x4 result;
+        result.m[3][0] = x;  // Translation in X (bottom row)
+        result.m[3][1] = y;  // Translation in Y (bottom row)
+        result.m[3][2] = z;  // Translation in Z (bottom row)
+        return result;
+    }
+    
+    // Helper function to create a scale matrix
+    static VmaxMatrix4x4 createScale(double x, double y, double z) {
+        VmaxMatrix4x4 result;
+        result.m[0][0] = x;  // Scale in X
+        result.m[1][1] = y;  // Scale in Y
+        result.m[2][2] = z;  // Scale in Z
+        return result;
+    }
+};
+
+// Converts axis-angle rotation to a 4x4 rotation matrix
+// Parameters:
+//   ax, ay, az: The axis vector to rotate around (doesn't need to be normalized)
+//   angle: The angle to rotate by (in radians)
+// Returns: A 4x4 rotation matrix that can be used to transform vectors
+VmaxMatrix4x4 axisAngleToMatrix4x4(double ax, double ay, double az, double angle) {
+    // Step 1: Normalize the axis vector to make it a unit vector
+    // This is required for the rotation formula to work correctly
+    double length = sqrt(ax*ax + ay*ay + az*az);
+    if (length != 0) {
+        ax /= length;
+        ay /= length;
+        az /= length;
+    }
+    
+    // Step 2: Calculate trigonometric values needed for the rotation
+    double s = sin(angle);  // sine of angle
+    double c = cos(angle);  // cosine of angle
+    double t = 1.0 - c;     // 1 - cos(angle), used in formula
+    
+    // Step 3: Create rotation matrix using Rodrigues' rotation formula
+    // This formula converts an axis-angle rotation into a 3x3 matrix
+    // We'll embed it in the upper-left corner of our 4x4 matrix
+    VmaxMatrix4x4 result;
+    
+    // First row of rotation matrix (upper-left 3x3 portion)
+    result.m[0][0] = t*ax*ax + c;      // First column
+    result.m[0][1] = t*ax*ay + s*az;   // Second column (changed sign)
+    result.m[0][2] = t*ax*az - s*ay;   // Third column (changed sign)
+    
+    // Second row of rotation matrix
+    result.m[1][0] = t*ax*ay - s*az;   // First column (changed sign)
+    result.m[1][1] = t*ay*ay + c;      // Second column
+    result.m[1][2] = t*ay*az + s*ax;   // Third column (changed sign)
+    
+    // Third row of rotation matrix
+    result.m[2][0] = t*ax*az + s*ay;   // First column (changed sign)
+    result.m[2][1] = t*ay*az - s*ax;   // Second column (changed sign)
+    result.m[2][2] = t*az*az + c;      // Third column
+    
+    // Fourth row and column remain unchanged (0,0,0,1)
+    // This is already set by the constructor
+    
+    return result;
+}
+
+struct VmaxRGBA {
     uint8_t r, g, b, a;
 };
 
-// Read a 256x1 PNG file and return a vector of VoxelRGBA colors
-std::vector<VoxelRGBA> read256x1PaletteFromPNG(const std::string& filename) {
+// Read a 256x1 PNG file and return a vector of VmaxRGBA colors
+std::vector<VmaxRGBA> read256x1PaletteFromPNG(const std::string& filename) {
     int width, height, channels;
     // Load the image with 4 desired channels (RGBA)
     unsigned char* data = stbi_load(filename.c_str(), &width, &height, &channels, 4);
@@ -38,10 +199,10 @@ std::vector<VoxelRGBA> read256x1PaletteFromPNG(const std::string& filename) {
         std::cerr << "Warning: Expected a 256x1 image, but got " << width << "x" << height << std::endl;
     }
     // Create our palette array
-    std::vector<VoxelRGBA> palette;
+    std::vector<VmaxRGBA> palette;
     // Read each pixel (each pixel is 4 bytes - RGBA)
     for (int i = 0; i < width; i++) {
-        VoxelRGBA color;
+        VmaxRGBA color;
         color.r = data[i * 4];
         color.g = data[i * 4 + 1];
         color.b = data[i * 4 + 2];
@@ -117,7 +278,7 @@ struct VmaxModel {
     // Each model has local 0-7 materials
     std::array<VmaxMaterial, 8> materials;
     // Each model has local colors
-    std::array<VoxelRGBA, 256> colors;
+    std::array<VmaxRGBA, 256> colors;
 
     // Constructor
     VmaxModel(const std::string& modelName) : vmaxbFileName(modelName) {
@@ -136,7 +297,7 @@ struct VmaxModel {
     }
     
     // Add a colors to this model
-    void addColors(const std::array<VoxelRGBA, 256> newColors) {
+    void addColors(const std::array<VmaxRGBA, 256> newColors) {
         colors = newColors;
     }
      
@@ -183,7 +344,7 @@ inline std::array<VmaxMaterial, 8> getVmaxMaterials(plist_t pnodPalettePlist) {
     plist_t materialsNode = plist_dict_get_item(pnodPalettePlist, "materials");
     if (materialsNode && plist_get_node_type(materialsNode) == PLIST_ARRAY) {
         uint32_t materialsCount = plist_array_get_size(materialsNode);
-        std::cout << "Found materials array with " << materialsCount << " items" << std::endl;
+        //std::cout << "Found materials array with " << materialsCount << " items" << std::endl;
         
         // Process each material
         for (uint32_t i = 0; i < materialsCount; i++) {
@@ -229,7 +390,7 @@ inline std::array<VmaxMaterial, 8> getVmaxMaterials(plist_t pnodPalettePlist) {
     } else {
         std::cout << "No materials array found or invalid type" << std::endl;
     }
-    #ifdef _DEBUG2
+    #ifdef _DEBUG23
         for (const auto& material : vmaxMaterials) {
             std::cout << "Material: " << material.materialName << std::endl;
             std::cout << "  Transmission: " << material.transmission << std::endl;
@@ -561,6 +722,7 @@ struct JsonGroupInfo {
     std::vector<double> extentMin;
     std::vector<double> extentMax;
     bool selected = false;
+    std::string parentId;
 };
 
 // Class to parse VoxelMax's scene.json
@@ -616,12 +778,14 @@ public:
                     // Check if selected
                     if (group.contains("s")) groupInfo.selected = group["s"].get<bool>();
                     
+                    if (group.contains("pid")) groupInfo.parentId = group["pid"];
                     // Store the group
                     groups[groupInfo.id] = groupInfo;
                 }
             }
             
-            // Parse objects (models) 
+            // Parse objects (models) , objects are instances of models
+            // Maybe rename this objects, will leave for now
             if (sceneData.contains("objects") && sceneData["objects"].is_array()) {
                 for (const auto& obj : sceneData["objects"]) {
                     JsonModelInfo modelInfo;
@@ -632,7 +796,7 @@ public:
                     if (obj.contains("n")) modelInfo.name = obj["n"];
                     
                     // Extract file paths
-                    if (obj.contains("data")) modelInfo.dataFile = obj["data"];
+                    if (obj.contains("data")) modelInfo.dataFile = obj["data"];// This is the canonical model
                     if (obj.contains("pal")) modelInfo.paletteFile = obj["pal"];
                     if (obj.contains("hist")) modelInfo.historyFile = obj["hist"];
                     
@@ -714,7 +878,7 @@ public:
         for (const auto& [file, count] : modelFiles) {
             std::cout << "  " << file << " (used " << count << " times)" << std::endl;
         }
-        
+        /* 
         std::cout << "\nGroups:" << std::endl;
         for (const auto& [id, group] : groups) {
             std::cout << "  " << group.name << " (ID: " << id << ")" << std::endl;
@@ -739,6 +903,15 @@ public:
                           << model.position[1] << ", " 
                           << model.position[2] << "]" << std::endl;
             }
+
+            if (!model.rotation.empty()) {
+                VmaxVector3 VmaxEuler = axisAngleToEulerXYZ(model.rotation[0], model.rotation[1], model.rotation[2], model.rotation[3]);
+                std::cout << "    Rotation: [" 
+                          << VmaxEuler.x << ", " 
+                          << VmaxEuler.y << ", " 
+                          << VmaxEuler.z << "]" << std::endl;
+            }
         }
+        */
     }
 };
