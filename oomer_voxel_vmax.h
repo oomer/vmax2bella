@@ -20,75 +20,11 @@ using json = nlohmann::json;
 #define STB_IMAGE_IMPLEMENTATION
 #include "thirdparty/stb_image.h" // STB Image library
 
-
-
-struct VmaxVector3 {
-    double x, y, z;
-};
-
-// Converts axis-angle rotation to Euler angles (in XYZ order)
-// Parameters:
-//   ax, ay, az: The axis vector to rotate around (doesn't need to be normalized)
-//   angle: The angle to rotate by (in radians)
-// Returns: Vector3 containing Euler angles (x=pitch, y=yaw, z=roll) in radians
-VmaxVector3 axisAngleToEulerXYZ(double ax, double ay, double az, double angle) {
-    // First normalize the axis
-    double length = sqrt(ax*ax + ay*ay + az*az);
-    if (length != 0) {
-        ax /= length;
-        ay /= length;
-        az /= length;
-    }
-    
-    // Compute sin and cos of angle
-    double s = sin(angle);
-    double c = cos(angle);
-    double t = 1.0 - c;
-    
-    // Build rotation matrix from axis-angle
-    // This is the Rodrigues' rotation formula
-    double m11 = t*ax*ax + c;
-    double m12 = t*ax*ay - s*az;
-    double m13 = t*ax*az + s*ay;
-    
-    double m21 = t*ax*ay + s*az;
-    double m22 = t*ay*ay + c;
-    double m23 = t*ay*az - s*ax;
-    
-    double m31 = t*ax*az - s*ay;
-    double m32 = t*ay*az + s*ax;
-    double m33 = t*az*az + c;
-    
-    // Convert rotation matrix to euler angles
-    VmaxVector3 euler;
-    
-    // Handle gimbal lock cases
-    if (m13 > 0.998) { // singularity at north pole
-        euler.y = atan2(m12, m22);
-        euler.x = M_PI/2;
-        euler.z = 0;
-    }
-    else if (m13 < -0.998) { // singularity at south pole
-        euler.y = atan2(m12, m22);
-        euler.x = -M_PI/2;
-        euler.z = 0;
-    }
-    else {
-        euler.x = asin(-m13);
-        euler.y = atan2(m23, m33);
-        euler.z = atan2(m12, m11);
-    }
-    
-    return euler;
-}
-
 // Structure to represent a 4x4 matrix for 3D transformations
 // The matrix is stored as a 2D array where m[i][j] represents row i, column j
 struct VmaxMatrix4x4 {
     double m[4][4];
-    
     // Constructor: Creates an identity matrix (1's on diagonal, 0's elsewhere)
-    // This is the default starting point for any transformation
     VmaxMatrix4x4() {
         for(int i = 0; i < 4; i++) {
             for(int j = 0; j < 4; j++) {
@@ -101,7 +37,6 @@ struct VmaxMatrix4x4 {
     // Returns: A new matrix that represents the combined transformation
     VmaxMatrix4x4 operator*(const VmaxMatrix4x4& other) const {
         VmaxMatrix4x4 result;
-        
         // Perform matrix multiplication
         for(int i = 0; i < 4; i++) {
             for(int j = 0; j < 4; j++) {
@@ -419,17 +354,13 @@ inline std::vector<VmaxVoxel> decodeVoxels(const std::vector<uint8_t>& dsData, i
     uint8_t material;
     uint8_t color;
     for (int i = 0; i < dsData.size() - 1; i += 2) {
-        //dsVoxel _vxVoxel; // VoxelMax data [todo] - should I use uint8_t for x, y, z?
         material = dsData[i]; // also known as a layer color
-        //_vxVoxel.material = static_cast<int>(dsData[i]); // also known as a layer color
         color = dsData[i + 1];
-        //_vxVoxel.color = static_cast<uint8_t>(dsData[i + 1]);
         uint32_t _tempx, _tempy, _tempz;
         decodeMorton3DOptimized(i/2 + mortonOffset,
                                 _tempx,
                                 _tempy,
                                 _tempz); // index IS the morton code
-        //std::cout << "i: " << i << " _tempx: " << _tempx << " _tempy: " << _tempy << " _tempz: " << _tempz << std::endl;
         if (color != 0) {
             VmaxVoxel voxel = {
                 static_cast<uint8_t>(_tempx), 
@@ -442,7 +373,6 @@ inline std::vector<VmaxVoxel> decodeVoxels(const std::vector<uint8_t>& dsData, i
             };
             voxels.push_back(voxel);
         }
-
     }
     return voxels;
 }
@@ -698,7 +628,7 @@ struct JsonModelInfo {
     std::string name;
     std::string dataFile;       // The .vmaxb file
     std::string paletteFile;    // The palette PNG
-    std::string historyFile;    // The history file
+    std::string historyFile;    // The history file, not sure what this is
     
     // Transform information
     std::vector<double> position;      // t_p
@@ -878,7 +808,7 @@ public:
         for (const auto& [file, count] : modelFiles) {
             std::cout << "  " << file << " (used " << count << " times)" << std::endl;
         }
-        /* 
+         
         std::cout << "\nGroups:" << std::endl;
         for (const auto& [id, group] : groups) {
             std::cout << "  " << group.name << " (ID: " << id << ")" << std::endl;
@@ -903,15 +833,6 @@ public:
                           << model.position[1] << ", " 
                           << model.position[2] << "]" << std::endl;
             }
-
-            if (!model.rotation.empty()) {
-                VmaxVector3 VmaxEuler = axisAngleToEulerXYZ(model.rotation[0], model.rotation[1], model.rotation[2], model.rotation[3]);
-                std::cout << "    Rotation: [" 
-                          << VmaxEuler.x << ", " 
-                          << VmaxEuler.y << ", " 
-                          << VmaxEuler.z << "]" << std::endl;
-            }
         }
-        */
     }
 };

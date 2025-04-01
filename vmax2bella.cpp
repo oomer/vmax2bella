@@ -235,16 +235,25 @@ int DL_main(dl::Args& args) {
             belGroupUUID = belGroupUUID.replace("-", "_"); // Make sure the group name is valid for a Bella node name
             belGroupUUID = "_" + belGroupUUID; // Make sure the group name is valid for a Bella node name
             belGroupNodes[belGroupUUID] = belScene.createNode("xform", belGroupUUID, belGroupUUID); // Create a Bella node for the group
+
+            // Rotate the object
             VmaxMatrix4x4 objectMat4 = axisAngleToMatrix4x4(  groupInfo.rotation[0], 
                                                                 groupInfo.rotation[1], 
                                                                 groupInfo.rotation[2], 
                                                                 groupInfo.rotation[3]);
+
+            // Translate the object
             VmaxMatrix4x4 objectTransMat4 = VmaxMatrix4x4();
-            //std::vector<double> translation = extentCenter-position;
             objectTransMat4 = objectTransMat4.createTranslation(groupInfo.position[0], 
                                                                 groupInfo.position[1], 
                                                                 groupInfo.position[2]);
-            objectMat4 = objectMat4 * objectTransMat4;
+
+            // Scale the object
+            VmaxMatrix4x4 objectScaleMat4 = VmaxMatrix4x4();
+            objectScaleMat4 = objectScaleMat4.createScale(groupInfo.scale[0], 
+                                                          groupInfo.scale[1], 
+                                                          groupInfo.scale[2]);
+            objectMat4 = objectScaleMat4 * objectMat4 * objectTransMat4;
 
             belGroupNodes[belGroupUUID]["steps"][0]["xform"] = dl::Mat4({
                 objectMat4.m[0][0], objectMat4.m[0][1], objectMat4.m[0][2], objectMat4.m[0][3],
@@ -298,28 +307,19 @@ int DL_main(dl::Args& args) {
             std::vector<double> scale = jsonModelInfo.scale;
             std::vector<double> extentCenter = jsonModelInfo.extentCenter;
 
-            //what is this for?
-            /*
-            auto jsonParentId = jsonModelInfo.parentId;
-            auto belParentId = dl::String(jsonParentId.c_str());
-            dl::String belParentGroupUUID = belParentId.replace("-", "_");
-            if (jsonParentId != "") {
-                belGroupNodes[belParentGroupUUID].parentTo(belWorld);
-            }
-            */
-
+            // Rotate the object
             VmaxMatrix4x4 modelMatrix = axisAngleToMatrix4x4(rotation[0], rotation[1], rotation[2], rotation[3]);
+
+            //  Translate the object
             VmaxMatrix4x4 transMatrix = VmaxMatrix4x4();
-            //std::vector<double> translation = extentCenter-position;
-            //transMatrix = transMatrix.createTranslation(extentCenter[0]-position[0], extentCenter[1]-position[1], extentCenter[2]-position[2]);
             transMatrix = transMatrix.createTranslation(position[0], 
                                                         position[1], 
                                                         position[2]);
-            modelMatrix = transMatrix*modelMatrix;
-            //std::cout << modelMatrix.m[0][0] << "," << modelMatrix.m[0][1] << "," << modelMatrix.m[0][2] << "," << modelMatrix.m[0][3] << std::endl;
-            //std::cout << modelMatrix.m[1][0] << "," << modelMatrix.m[1][1] << "," << modelMatrix.m[1][2] << "," << modelMatrix.m[1][3] << std::endl;
-            //std::cout << modelMatrix.m[2][0] << "," << modelMatrix.m[2][1] << "," << modelMatrix.m[2][2] << "," << modelMatrix.m[2][3] << std::endl;
-            //std::cout << modelMatrix.m[3][0] << "," << modelMatrix.m[3][1] << "," << modelMatrix.m[3][2] << "," << modelMatrix.m[3][3] << std::endl;
+            VmaxMatrix4x4 scaleMatrix = VmaxMatrix4x4();
+            scaleMatrix = scaleMatrix.createScale(scale[0], 
+                                                  scale[1], 
+                                                  scale[2]);
+            modelMatrix = scaleMatrix * modelMatrix * transMatrix;
 
             // Get file names
             dl::String materialName = vmaxDirName + "/" + jsonModelInfo.paletteFile.c_str();
@@ -410,7 +410,6 @@ int DL_main(dl::Args& args) {
                 dl::String canonicalName = getCanonicalName.replace(".vmaxb", "");
                 //get bel node from canonical name
                 auto belCanonicalNode = belCanonicalNodes[canonicalName.buf()];
-                // create a new xform 
                 auto foofoo = belScene.findNode(canonicalName);
 
                 VmaxMatrix4x4 objectMat4 = axisAngleToMatrix4x4(  rotation[0], 
@@ -418,14 +417,16 @@ int DL_main(dl::Args& args) {
                                                                     rotation[2], 
                                                                     rotation[3]);
                 VmaxMatrix4x4 objectTransMat4 = VmaxMatrix4x4();
-                //std::vector<double> translation = extentCenter-position;
-                /*objectTransMat4 = objectTransMat4.createTranslation(extentCenter[0]-position[0], 
-                                                                    extentCenter[1]-position[1], 
-                                                                    extentCenter[2]-position[2]);*/
                 objectTransMat4 = objectTransMat4.createTranslation(position[0], 
                                                                     position[1], 
                                                                     position[2]);
-                objectMat4 = objectMat4 * objectTransMat4;
+
+                VmaxMatrix4x4 objectScaleMat4 = VmaxMatrix4x4();
+                objectScaleMat4 = objectScaleMat4.createScale(scale[0], 
+                                                              scale[1], 
+                                                              scale[2]);
+
+                objectMat4 = objectScaleMat4 * objectMat4 * objectTransMat4;
 
                 auto belNodeObjectInstance = belScene.createNode("xform", belObjectId, belObjectId);
                 belNodeObjectInstance["steps"][0]["xform"] = dl::Mat4({
