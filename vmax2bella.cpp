@@ -220,11 +220,22 @@ int DL_main(dl::Args& args) {
         belScene.loadDefs();
         auto belWorld = belScene.world(true);
 
-        // Parse the scene.json file to get the models
+        // scene.json is the toplevel file that hierarchically defines the scene
+        // it contains nestable groups (containers) and objects (instances) that point to resources that define the object
+        // objects properties
+        //  - transformation matrix
+        // objects resources
+        /// - reference a contentsN.vmaxb (lzfse compressed plist file) that contains a 256x256x256 voxel "model"
+        //  - reference to a paletteN.png that defines the 256 24bit colors used in the 256x256x256 model
+        //  - reference to a paletteN.settings.vmaxpsb (plist file) that defines the 8 materials used in the "model"
+        // In scenegraph parlance a group is a xform, a object is a transform with a child geometry 
+        // multiple objects can point to the same model creating what is known as an instance
         JsonVmaxSceneParser vmaxSceneParser;
         vmaxSceneParser.parseScene((vmaxDirName+"/scene.json").buf());
-        //auto models = vmaxSceneParser.getModels();
-        vmaxSceneParser.printSummary();
+
+        #ifdef _DEBUG
+            vmaxSceneParser.printSummary();
+        #endif
         std::map<std::string, JsonGroupInfo> jsonGroups = vmaxSceneParser.getGroups();
         std::map<dl::String, dl::bella_sdk::Node> belGroupNodes; // Map of UUID to bella node
         std::map<dl::String, dl::bella_sdk::Node> belCanonicalNodes; // Map of UUID to bella node
@@ -236,24 +247,17 @@ int DL_main(dl::Args& args) {
             belGroupUUID = "_" + belGroupUUID; // Make sure the group name is valid for a Bella node name
             belGroupNodes[belGroupUUID] = belScene.createNode("xform", belGroupUUID, belGroupUUID); // Create a Bella node for the group
 
-            // Rotate the object
-            VmaxMatrix4x4 objectMat4 = axisAngleToMatrix4x4(  groupInfo.rotation[0], 
-                                                                groupInfo.rotation[1], 
-                                                                groupInfo.rotation[2], 
-                                                                groupInfo.rotation[3]);
 
-            // Translate the object
-            VmaxMatrix4x4 objectTransMat4 = VmaxMatrix4x4();
-            objectTransMat4 = objectTransMat4.createTranslation(groupInfo.position[0], 
-                                                                groupInfo.position[1], 
-                                                                groupInfo.position[2]);
-
-            // Scale the object
-            VmaxMatrix4x4 objectScaleMat4 = VmaxMatrix4x4();
-            objectScaleMat4 = objectScaleMat4.createScale(groupInfo.scale[0], 
-                                                          groupInfo.scale[1], 
-                                                          groupInfo.scale[2]);
-            objectMat4 = objectScaleMat4 * objectMat4 * objectTransMat4;
+            VmaxMatrix4x4 objectMat4 = combineVmaxTransforms(groupInfo.rotation[0], 
+                                              groupInfo.rotation[1], 
+                                              groupInfo.rotation[2], 
+                                              groupInfo.rotation[3],
+                                              groupInfo.position[0], 
+                                              groupInfo.position[1], 
+                                              groupInfo.position[2], 
+                                              groupInfo.scale[0], 
+                                              groupInfo.scale[1], 
+                                              groupInfo.scale[2]);
 
             belGroupNodes[belGroupUUID]["steps"][0]["xform"] = dl::Mat4({
                 objectMat4.m[0][0], objectMat4.m[0][1], objectMat4.m[0][2], objectMat4.m[0][3],
@@ -307,19 +311,18 @@ int DL_main(dl::Args& args) {
             std::vector<double> scale = jsonModelInfo.scale;
             std::vector<double> extentCenter = jsonModelInfo.extentCenter;
 
-            // Rotate the object
-            VmaxMatrix4x4 modelMatrix = axisAngleToMatrix4x4(rotation[0], rotation[1], rotation[2], rotation[3]);
 
-            //  Translate the object
-            VmaxMatrix4x4 transMatrix = VmaxMatrix4x4();
-            transMatrix = transMatrix.createTranslation(position[0], 
-                                                        position[1], 
-                                                        position[2]);
-            VmaxMatrix4x4 scaleMatrix = VmaxMatrix4x4();
-            scaleMatrix = scaleMatrix.createScale(scale[0], 
-                                                  scale[1], 
-                                                  scale[2]);
-            modelMatrix = scaleMatrix * modelMatrix * transMatrix;
+            /*VmaxMatrix4x4 modelMat4 = combineVmaxTransforms(rotation[0], 
+                                                            rotation[1], 
+                                                            rotation[2], 
+                                                            rotation[3],
+                                                            position[0], 
+                                                            position[1], 
+                                                            position[2], 
+                                                            scale[0], 
+                                                            scale[1], 
+                                                            scale[2]);*/
+            //modelMatrix = scaleMatrix * modelMatrix * transMatrix;
 
             // Get file names
             dl::String materialName = vmaxDirName + "/" + jsonModelInfo.paletteFile.c_str();
@@ -412,21 +415,17 @@ int DL_main(dl::Args& args) {
                 auto belCanonicalNode = belCanonicalNodes[canonicalName.buf()];
                 auto foofoo = belScene.findNode(canonicalName);
 
-                VmaxMatrix4x4 objectMat4 = axisAngleToMatrix4x4(  rotation[0], 
-                                                                    rotation[1], 
-                                                                    rotation[2], 
-                                                                    rotation[3]);
-                VmaxMatrix4x4 objectTransMat4 = VmaxMatrix4x4();
-                objectTransMat4 = objectTransMat4.createTranslation(position[0], 
-                                                                    position[1], 
-                                                                    position[2]);
 
-                VmaxMatrix4x4 objectScaleMat4 = VmaxMatrix4x4();
-                objectScaleMat4 = objectScaleMat4.createScale(scale[0], 
-                                                              scale[1], 
-                                                              scale[2]);
-
-                objectMat4 = objectScaleMat4 * objectMat4 * objectTransMat4;
+                VmaxMatrix4x4 objectMat4 = combineVmaxTransforms(rotation[0], 
+                                                                 rotation[1], 
+                                                                 rotation[2], 
+                                                                 rotation[3],
+                                                                 position[0], 
+                                                                 position[1], 
+                                                                 position[2], 
+                                                                 scale[0], 
+                                                                 scale[1], 
+                                                                 scale[2]);
 
                 auto belNodeObjectInstance = belScene.createNode("xform", belObjectId, belObjectId);
                 belNodeObjectInstance["steps"][0]["xform"] = dl::Mat4({

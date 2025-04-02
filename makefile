@@ -2,13 +2,14 @@
 BELLA_SDK_NAME    = bella_scene_sdk
 EXECUTABLE_NAME   = vmax2bella
 PLATFORM          = $(shell uname)
+BUILD_TYPE        ?= release# Default to release build if not specified
 
 # Common paths
 BELLA_SDK_PATH    = ../bella_scene_sdk
 LZFSE_PATH        = ../lzfse
 LIBPLIST_PATH     = ../libplist
-OBJ_DIR           = obj/$(PLATFORM)
-BIN_DIR           = bin/$(PLATFORM)
+OBJ_DIR           = obj/$(PLATFORM)/$(BUILD_TYPE)
+BIN_DIR           = bin/$(PLATFORM)/$(BUILD_TYPE)
 OUTPUT_FILE       = $(BIN_DIR)/$(EXECUTABLE_NAME)
 
 # Platform-specific configuration
@@ -68,20 +69,25 @@ PLIST_LIB_DIR      = $(LIBPLIST_PATH)/src/.libs
 LIB_PATHS          = -L$(SDK_LIB_PATH) -L$(LZFSE_BUILD_DIR) -L$(PLIST_LIB_DIR)
 LIBRARIES          = -l$(BELLA_SDK_NAME) -lm -ldl -llzfse $(PLIST_LIB)
 
-# Common compiler flags
-COMMON_FLAGS       = $(ARCH_FLAGS) -fvisibility=hidden -O3 $(INCLUDE_PATHS)
+# Build type specific flags
+ifeq ($(BUILD_TYPE), debug)
+    CPP_DEFINES = -D_DEBUG -DDL_USE_SHARED
+    COMMON_FLAGS = $(ARCH_FLAGS) -fvisibility=hidden -g -O0 $(INCLUDE_PATHS)
+else
+    CPP_DEFINES = -DNDEBUG=1 -DDL_USE_SHARED
+    COMMON_FLAGS = $(ARCH_FLAGS) -fvisibility=hidden -O3 $(INCLUDE_PATHS)
+endif
 
 # Language-specific flags
 C_FLAGS            = $(COMMON_FLAGS) -std=c17
 CXX_FLAGS          = $(COMMON_FLAGS) -std=c++17 -Wno-deprecated-declarations
-CPP_DEFINES        = -DNDEBUG=1 -DDL_USE_SHARED
 
 # Objects
 OBJECTS            = vmax2bella.o 
 OBJECT_FILES       = $(patsubst %,$(OBJ_DIR)/%,$(OBJECTS))
 
 # Build rules
-$(OBJ_DIR)/%.o: %.cpp
+$(OBJ_DIR)/vmax2bella.o: vmax2bella.cpp
 	@mkdir -p $(@D)
 	$(CXX) -c -o $@ $< $(CXX_FLAGS) $(CPP_DEFINES)
 
@@ -94,9 +100,32 @@ $(OUTPUT_FILE): $(OBJECT_FILES)
 	@cp $(PLIST_LIB_DIR)/$(PLIST_LIB_NAME) $(BIN_DIR)/
 	@echo "Build complete: $(OUTPUT_FILE)"
 
-.PHONY: clean
+# Add default target
+all: $(OUTPUT_FILE)
+
+.PHONY: clean cleanall all
 clean:
-	rm -f $(OBJ_DIR)/*.o
+	rm -f $(OBJ_DIR)/vmax2bella.o
 	rm -f $(OUTPUT_FILE)
 	rm -f $(BIN_DIR)/$(SDK_LIB_FILE)
 	rm -f $(BIN_DIR)/*.dylib
+	rmdir $(OBJ_DIR) 2>/dev/null || true
+	rmdir $(BIN_DIR) 2>/dev/null || true
+
+cleanall:
+	rm -f obj/*/release/*.o
+	rm -f obj/*/debug/*.o
+	rm -f bin/*/release/$(EXECUTABLE_NAME)
+	rm -f bin/*/debug/$(EXECUTABLE_NAME)
+	rm -f bin/*/release/$(SDK_LIB_FILE)
+	rm -f bin/*/debug/$(SDK_LIB_FILE)
+	rm -f bin/*/release/*.dylib
+	rm -f bin/*/debug/*.dylib
+	rmdir obj/*/release 2>/dev/null || true
+	rmdir obj/*/debug 2>/dev/null || true
+	rmdir bin/*/release 2>/dev/null || true
+	rmdir bin/*/debug 2>/dev/null || true
+	rmdir obj/* 2>/dev/null || true
+	rmdir bin/* 2>/dev/null || true
+	rmdir obj 2>/dev/null || true
+	rmdir bin 2>/dev/null || true

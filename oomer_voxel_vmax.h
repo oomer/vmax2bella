@@ -1,5 +1,9 @@
 #pragma once
 
+// This is a set of common oomer utilities for Vmax models
+// Will avoid using bella_sdk
+
+
 // Standard C++ library includes - these provide essential functionality
 #include <map>          // For key-value pair data structures (maps)
 #include <set>          // For set data structure
@@ -19,6 +23,10 @@ using json = nlohmann::json;
 // Define STB_IMAGE_IMPLEMENTATION before including to create the implementation
 #define STB_IMAGE_IMPLEMENTATION
 #include "thirdparty/stb_image.h" // STB Image library
+
+
+
+
 
 // Structure to represent a 4x4 matrix for 3D transformations
 // The matrix is stored as a 2D array where m[i][j] represents row i, column j
@@ -114,6 +122,31 @@ VmaxMatrix4x4 axisAngleToMatrix4x4(double ax, double ay, double az, double angle
     
     return result;
 }
+
+// Combine a rotation, translation, and scale into a single 4x4 matrix
+// Parameters:
+//   rotx, roty, rotz: The axis vector to rotate around (doesn't need to be normalized)
+//   rota: The angle to rotate by (in radians)
+//   posx, posy, posz: The position to translate to
+//   scalex, scaley, scalez: The scale to apply to the object
+// Returns: A 4x4 matrix that represents the combined transformation
+VmaxMatrix4x4 combineVmaxTransforms(double rotx, double roty, double rotz, double rota, double posx, double posy, double posz, double scalex, double scaley, double scalez) {
+    VmaxMatrix4x4 rotMat4 = axisAngleToMatrix4x4(rotx, 
+                                                 roty, 
+                                                 rotz, 
+                                                 rota);
+    VmaxMatrix4x4 transMat4 = VmaxMatrix4x4();
+    transMat4 = transMat4.createTranslation(posx, 
+                                            posy, 
+                                            posz);
+    VmaxMatrix4x4 scaleMat4 = VmaxMatrix4x4();
+    scaleMat4 = scaleMat4.createScale(scalex, 
+                                      scaley, 
+                                      scalez);
+    VmaxMatrix4x4 resultMat4 = scaleMat4 * rotMat4 * transMat4;
+    return resultMat4;
+}
+
 
 struct VmaxRGBA {
     uint8_t r, g, b, a;
