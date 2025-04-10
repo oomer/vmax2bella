@@ -178,13 +178,22 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 
 #include "oomer_voxel_vmax.h"   // common vmax voxel code and structures
 #include "oomer_misc.h"         // common misc code
+#include "oomer_voxel_ogt.h"    // common opengametools voxel conversion wrappers
+
+#define OGT_VOX_IMPLEMENTATION
+#include "../opengametools/src/ogt_vox.h"
+
 
 dl::bella_sdk::Node essentialsToScene(dl::bella_sdk::Scene& belScene);
-dl::bella_sdk::Node addModelToScene(dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const VmaxModel& vmaxModel, const std::vector<VmaxRGBA>& vmaxPalette, const std::array<VmaxMaterial, 8>& vmaxMaterial); 
+dl::bella_sdk::Node addModelToScene(dl::Args& args, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const VmaxModel& vmaxModel, const std::vector<VmaxRGBA>& vmaxPalette, const std::array<VmaxMaterial, 8>& vmaxMaterial); 
+dl::bella_sdk::Node add_ogt_mesh_to_scene(dl::String bellaName, ogt_mesh* ogtMesh, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld );
 
 int DL_main(dl::Args& args) {
     args.add("i", "input", "", "vmax directory or vmax.zip file");
     args.add("o", "output", "", "set output bella file name");
+    args.add("mo", "mode", "", "mode for output, mesh, voxel, or both");
+    args.add("mt", "meshtype", "", "meshtype classic, greedy, other");
+    args.add("be", "bevel", "", "add bevel to material");
     args.add("tp",  "thirdparty",   "",   "prints third party licenses");
     args.add("li",  "licenseinfo",   "",   "prints license info");
 
@@ -211,9 +220,11 @@ int DL_main(dl::Args& args) {
     if (args.have("--input"))
     {
         dl::String bszName;
+        dl::String objName;
         dl::String vmaxDirName;
         vmaxDirName = args.value("--input");
         bszName = vmaxDirName.replace("vmax", "bsz");
+        objName = vmaxDirName.replace("vmax", "obj");
 
         // Create a new scene
         dl::bella_sdk::Scene belScene;
@@ -294,8 +305,6 @@ int DL_main(dl::Args& args) {
         std::vector<VmaxModel> allModels;
         std::vector<std::vector<VmaxRGBA>> vmaxPalettes; // one palette per model
         std::vector<std::array<VmaxMaterial, 8>> vmaxMaterials; // one material per model
-        //std::vector<std::array<VmaxMaterial, 8>> allMaterials; // one material per model
-        //std::vector<std::vector<VmaxRGBA>> allPalettes;
 
         essentialsToScene(belScene); // create the basic scene elements in Bella
         
@@ -310,19 +319,6 @@ int DL_main(dl::Args& args) {
             std::vector<double> rotation = jsonModelInfo.rotation;
             std::vector<double> scale = jsonModelInfo.scale;
             std::vector<double> extentCenter = jsonModelInfo.extentCenter;
-
-
-            /*VmaxMatrix4x4 modelMat4 = combineVmaxTransforms(rotation[0], 
-                                                            rotation[1], 
-                                                            rotation[2], 
-                                                            rotation[3],
-                                                            position[0], 
-                                                            position[1], 
-                                                            position[2], 
-                                                            scale[0], 
-                                                            scale[1], 
-                                                            scale[2]);*/
-            //modelMatrix = scaleMatrix * modelMatrix * transMatrix;
 
             // Get file names
             dl::String materialName = vmaxDirName + "/" + jsonModelInfo.paletteFile.c_str();
@@ -381,8 +377,13 @@ int DL_main(dl::Args& args) {
             std::cout << modelIndex << "Model: " << eachModel.vmaxbFileName << std::endl;
             std::cout << "Voxel Count Model: " << eachModel.getTotalVoxelCount() << std::endl;
             
-            dl::bella_sdk::Node belModel = addModelToScene(belScene, belWorld, eachModel, vmaxPalettes[modelIndex], vmaxMaterials[modelIndex]);
-            // TODO add to a map of canonical models
+            dl::bella_sdk::Node belModel = addModelToScene( args,
+                                                            belScene, 
+                                                            belWorld, 
+                                                            eachModel, 
+                                                            vmaxPalettes[modelIndex], 
+                                                            vmaxMaterials[modelIndex]);
+            // TODO add to a map00000 of canonical models
             dl::String lllmodelName = dl::String(eachModel.vmaxbFileName.c_str());
             dl::String lllcanonicalName = lllmodelName.replace(".vmaxb", "");
             std::cout << "========lllcanonicalName: " << lllcanonicalName.buf() << std::endl;
@@ -402,19 +403,18 @@ int DL_main(dl::Args& args) {
                 std::vector<double> extentCenter = jsonModelInfo.extentCenter;
                 auto jsonParentId = jsonModelInfo.parentId;
                 auto belParentId = dl::String(jsonParentId.c_str());
-                dl::String belParentGroupUUID = belParentId.replace("-", "_");
-                belParentGroupUUID = "_" + belParentGroupUUID;
+                dl::String belParentGroupUUID = belParentId.replace("-", "_"); // Make sure the group name is valid for a Bella node name
+                belParentGroupUUID = "_" + belParentGroupUUID; // Make sure the group name is valid for a Bella node name
 
                 auto belObjectId = dl::String(jsonModelInfo.id.c_str());
-                belObjectId = belObjectId.replace("-", "_");
-                belObjectId = "_" + belObjectId;
+                belObjectId = belObjectId.replace("-", "_"); // Make sure the object name is valid for a Bella node name
+                belObjectId = "_" + belObjectId; // Make sure the object name is valid for a Bella node name
 
                 dl::String getCanonicalName = dl::String(jsonModelInfo.dataFile.c_str());
                 dl::String canonicalName = getCanonicalName.replace(".vmaxb", "");
                 //get bel node from canonical name
                 auto belCanonicalNode = belCanonicalNodes[canonicalName.buf()];
                 auto foofoo = belScene.findNode(canonicalName);
-
 
                 VmaxMatrix4x4 objectMat4 = combineVmaxTransforms(rotation[0], 
                                                                  rotation[1], 
@@ -438,7 +438,8 @@ int DL_main(dl::Args& args) {
                 if (jsonParentId == "") {
                     belNodeObjectInstance.parentTo(belScene.world());
                 } else {
-                    belNodeObjectInstance.parentTo(belGroupNodes[belParentGroupUUID]);
+                    dl::bella_sdk::Node myParentGroup = belGroupNodes[belParentGroupUUID]; // Get bella obj
+                    belNodeObjectInstance.parentTo(myParentGroup); // Group underneath a group
                 }
                 foofoo.parentTo(belNodeObjectInstance);
             }
@@ -493,7 +494,7 @@ dl::bella_sdk::Node essentialsToScene(dl::bella_sdk::Scene& belScene) {
         belColorDome["horizon"] = dl::Rgba{.85f, 0.76f, 0.294f, 1.0f};
         belColorDome["altitude"] = 14.0f;
         // Configure ground plane
-        belGroundPlane["elevation"]    = -.5f;
+        //belGroundPlane["elevation"]    = -.5f;
         belGroundPlane["material"]     = belGroundMat;
 
         /* Commented out: Sun configuration
@@ -522,6 +523,10 @@ dl::bella_sdk::Node essentialsToScene(dl::bella_sdk::Scene& belScene) {
         auto belLiqVoxelForm   = belScene.createNode("xform","oomerLiqVoxelXform","oomerLiqVoxelXform");
         auto belVoxelMat       = belScene.createNode("orenNayar","oomerVoxelMat","oomerVoxelMat");
         auto belMeshVoxel   = belScene.createNode("mesh", "oomerMeshVoxel");
+        auto belBevel = belScene.createNode("bevel", "oomerBevel");
+        belBevel["radius"] = 90.0f;
+        belBevel["samples"] =dl::UInt(6); 
+
         #include "resources/smoothcube.h"
        // Configure voxel box dimensions
         belVoxel["radius"]  = 0.33f;
@@ -554,7 +559,12 @@ dl::bella_sdk::Node essentialsToScene(dl::bella_sdk::Scene& belScene) {
 // The datastream contains the voxels for the snapshot
 // The voxels are stored in chunks, each chunk is 8x8x8 voxels
 // The chunks are stored in a morton order
-dl::bella_sdk::Node addModelToScene(dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const VmaxModel& vmaxModel, const std::vector<VmaxRGBA>& vmaxPalette, const std::array<VmaxMaterial, 8>& vmaxMaterial) {
+dl::bella_sdk::Node addModelToScene(dl::Args& args,
+                                    dl::bella_sdk::Scene& belScene, 
+                                    dl::bella_sdk::Node& belWorld, 
+                                    const VmaxModel& vmaxModel, 
+                                    const std::vector<VmaxRGBA>& vmaxPalette, 
+                                    const std::array<VmaxMaterial, 8>& vmaxMaterial) {
     // Create Bella scene nodes for each voxel
     int i = 0;
     dl::String modelName = dl::String(vmaxModel.vmaxbFileName.c_str());
@@ -568,30 +578,31 @@ dl::bella_sdk::Node addModelToScene(dl::bella_sdk::Scene& belScene, dl::bella_sd
         auto belMeshVoxel = belScene.findNode("oomerMeshVoxel");
         auto belVoxelForm = belScene.findNode("oomerVoxelXform");
         auto belLiqVoxelForm = belScene.findNode("oomerLiqVoxelXform");
+        auto belBevel = belScene.findNode("oomerBevel");
 
         auto modelXform = belScene.createNode("xform", canonicalName, canonicalName);
         modelXform["steps"][0]["xform"] = dl::Mat4 {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
         for (const auto& [material, colorID] : vmaxModel.getUsedMaterialsAndColors()) {
             for (int color : colorID) {
-                auto belInstancer  = belScene.createNode("instancer",
-                                canonicalName + dl::String("Material") + dl::String(material) + dl::String("Color") + dl::String(color));
-                auto xformsArray = dl::ds::Vector<dl::Mat4f>();
-                belInstancer["steps"][0]["xform"] = dl::Mat4 {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
-                belInstancer.parentTo(modelXform);
+
+                auto thisname = canonicalName + dl::String("Material") + dl::String(material) + dl::String("Color") + dl::String(color);
 
                 auto belMaterial  = belScene.createNode("quickMaterial",
                                 canonicalName + dl::String("vmaxMat") + dl::String(material) + dl::String("Color") + dl::String(color));
-
+                bool isMesh = false;
+                bool isBox = true;
 
                 if(material==7) {
                     belMaterial["type"] = "liquid";
                     //belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
-                    belMaterial["liquidDepth"] = 100.0f;
-                    belMaterial["ior"] = 1.11f;
+                    belMaterial["liquidDepth"] = 300.0f;
+                    belMaterial["liquidIor"] = 1.33f;
+                    isMesh = true;
+                    isBox = false;
                 } else if(material==6 || vmaxPalette[color-1].a < 255) {
                     belMaterial["type"] = "glass";
                     belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
-                    belMaterial["glassDepth"] = 200.0f;
+                    belMaterial["glassDepth"] = 500.0f;
                 } else if(vmaxMaterial[material].metalness > 0.1f) {
                     belMaterial["type"] = "metal";
                     belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
@@ -606,7 +617,15 @@ dl::bella_sdk::Node addModelToScene(dl::bella_sdk::Scene& belScene, dl::bella_sd
                     belMaterial["type"] = "plastic";
                     belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
                 }
-                belInstancer["material"] = belMaterial;
+
+                if (args.have("bevel")) {
+                    belMaterial["bevel"] = belBevel;
+                }
+                if (args.have("mode") && args.value("mode") == "mesh" || args.value("mode") == "both") {
+                    isMesh = true;
+                    isBox = false;
+                }
+
                 // Convert 0-255 to 0-1 , remember to -1 color index becuase voxelmax needs 0 to indicate no voxel
                 double bellaR = static_cast<double>(vmaxPalette[color-1].r)/255.0;
                 double bellaG = static_cast<double>(vmaxPalette[color-1].g)/255.0;
@@ -623,36 +642,107 @@ dl::bella_sdk::Node addModelToScene(dl::bella_sdk::Scene& belScene, dl::bella_sd
                 const std::vector<VmaxVoxel>& voxelsOfType = vmaxModel.getVoxels(material, color);
                 int showchunk =0;
 
-                // Right now we group voxels by MatCol ie Mat0Col2
-                // But voxels are stored in chunks with many colors 
-                // Since we aren't grouping voxels in chunks, we need to traverse the voxels 
-                // and offset each voxel by the morton decode of chunk index
-                for (const auto& eachvoxel : voxelsOfType) {
-                    // Get chunk coordinates and world origin
-                    uint32_t _tempx, _tempy, _tempz;
-                    decodeMorton3DOptimized(eachvoxel.chunkID, _tempx, _tempy, _tempz); // index IS the morton code
-                    int worldOffsetX = _tempx * 24; // get world loc within 256x256x256 grid
-                    int worldOffsetY = _tempy * 24; // Don't know why we need to multiply by 24
-                    int worldOffsetZ = _tempz * 24; // use to be 32
-                    xformsArray.push_back( dl::Mat4f{  1, 0, 0, 0, 
+                if (isMesh) {
+                    auto belMeshXform  = belScene.createNode("xform",
+                        thisname+dl::String("Xform"));
+                    belMeshXform.parentTo(modelXform);
+
+                    std::cout << "Converting voxels to mesh\n";
+                    // Convert voxels of a particular color to ogt_vox_model
+                    ogt_vox_model* ogt_model = convert_voxelsoftype_to_ogt_vox(voxelsOfType);
+                    ogt_mesh_rgba* palette = new ogt_mesh_rgba[256]; // Create a palette array
+                    for (int i = 0; i < 256; i++) { // Copy palette from Vmax to OGT
+                        palette[i] = ogt_mesh_rgba{vmaxPalette[i].r, vmaxPalette[i].g, vmaxPalette[i].b, vmaxPalette[i].a};
+                    }
+                    ogt_voxel_meshify_context ctx = {}; // Create a context struct, not a pointer, todo , what is this for
+
+                    // Convert ogt voxels to mesh
+                    ogt_mesh* mesh = ogt_mesh_from_paletted_voxels_simple(  &ctx,
+                                                                            ogt_model->voxel_data, 
+                                                                            ogt_model->size_x, 
+                                                                            ogt_model->size_y, 
+                                                                            ogt_model->size_z, 
+                                                                            palette ); 
+                        
+                    if (voxelsOfType.size() > 0) {
+                        auto belMesh = add_ogt_mesh_to_scene(   thisname,
+                                                                mesh,
+                                                                belScene,
+                                                                belWorld
+                                                            );
+                        belMesh.parentTo(belMeshXform);
+                        belMeshXform["material"] = belMaterial;
+                    } else { 
+                        std::cout << "skipping" << color << "\n";
+                    }
+                }
+                if (isBox) {
+                    auto belInstancer  = belScene.createNode("instancer",
+                        thisname);
+                    auto xformsArray = dl::ds::Vector<dl::Mat4f>();
+                    belInstancer["steps"][0]["xform"] = dl::Mat4 {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+                    belInstancer.parentTo(modelXform);
+
+                    std::cout << "Converting voxels to bella boxes\n";
+                    //WARNING we use to do morton decoding above but now VoxModel does it when addVoxel is called
+                    // So we can just use the x,y,z values
+                    for (const auto& eachvoxel : voxelsOfType) {
+                        xformsArray.push_back( dl::Mat4f{  1, 0, 0, 0, 
                                                         0, 1, 0, 0, 
                                                         0, 0, 1, 0, 
-                                                        static_cast<float>(eachvoxel.x + worldOffsetX),
-                                                        static_cast<float>(eachvoxel.y + worldOffsetY),
-                                                        static_cast<float>(eachvoxel.z + worldOffsetZ), 1 });
-                }
-                belInstancer["steps"][0]["instances"] = xformsArray;
-                if(material==7) {
-                    belLiqVoxel.parentTo(belInstancer);
-                } else {
-                    belMeshVoxel.parentTo(belInstancer);
-                }
-                if(vmaxMaterial[material].emission > 0.0f) {
-                    belVoxelForm.parentTo(belInstancer);
+                                                        (static_cast<float>(eachvoxel.x))+0.5f,  // offset center of voxel to match mesh
+                                                        (static_cast<float>(eachvoxel.y))+0.5f,
+                                                        (static_cast<float>(eachvoxel.z))+0.5f, 1 });
+                    };
+                    belInstancer["steps"][0]["instances"] = xformsArray;
+                    belInstancer["material"] = belMaterial;
+                    if(material==7) {
+                        belLiqVoxel.parentTo(belInstancer);
+                    } else {
+                        belMeshVoxel.parentTo(belInstancer);
+                    }
+                    if(vmaxMaterial[material].emission > 0.0f) {
+                        belVoxelForm.parentTo(belInstancer);
+                    }
                 }
             }
         }
         return modelXform;
     }
     return dl::bella_sdk::Node();
+}
+
+dl::bella_sdk::Node add_ogt_mesh_to_scene(dl::String name, ogt_mesh* meshmesh, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld ) {
+
+    //auto ogtXform = belScene.createNode("xform", name+"ogtXform", name+"ogtXform");
+    //ogtXform["steps"][0]["xform"] = dl::Mat4 {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+    //ogtXform.parentTo(belWorld);
+    auto ogtMesh = belScene.createNode("mesh", name+"ogtmesh", name+"ogtmesh");
+    ogtMesh["normals"] = "flat";
+    // Add vertices and faces to the mesh
+    dl::ds::Vector<dl::Pos3f> verticesArray;
+    for (uint32_t i = 0; i < meshmesh->vertex_count; i++) {
+        const auto& vertex = meshmesh->vertices[i];
+        uint32_t xx = static_cast<uint32_t>(vertex.pos.x);
+        uint32_t yy = static_cast<uint32_t>(vertex.pos.y);
+        uint32_t zz = static_cast<uint32_t>(vertex.pos.z);
+        verticesArray.push_back(dl::Pos3f{ static_cast<float>(xx), 
+                                            static_cast<float>(yy), 
+                                            static_cast<float>(zz) });
+
+    }
+
+    ogtMesh["steps"][0]["points"] = verticesArray;
+
+
+    dl::ds::Vector<dl::Vec4u> facesArray;
+    for (size_t i = 0; i < meshmesh->index_count; i+=3) {
+        facesArray.push_back(dl::Vec4u{ static_cast<unsigned int>(meshmesh->indices[i]), 
+                                        static_cast<unsigned int>(meshmesh->indices[i+1]), 
+                                        static_cast<unsigned int>(meshmesh->indices[i+2]), 
+                                        static_cast<unsigned int>(meshmesh->indices[i+2]) });
+    }
+    ogtMesh["polygons"] = facesArray;
+
+    return ogtMesh;
 }

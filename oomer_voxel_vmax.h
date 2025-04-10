@@ -233,7 +233,17 @@ struct VmaxMaterial {
     bool volumetric; // future use
 };
 
+struct VmaxVoxelGrid {
+    // dimensions of the voxel grid
+    uint32_t size_x, size_y, size_z;
+    // voxel data
+    uint8_t* voxel_data;
+};
+
+
 // Create a structure to represent a model with its voxels with helper functions
+// since the xyz coords are at the voxel level, we need an accessor to walk it sequentially
+// maybe I create a new structure called VmaxVoxelGrid
 struct VmaxModel {
     // Model identifier or name
     std::string vmaxbFileName; // file name is used like a key
@@ -243,32 +253,118 @@ struct VmaxModel {
     // Second dimension: color (1-255, index 0 unused since color 0 means no voxel)
     std::vector<VmaxVoxel> voxels[8][256];
     
+    // EDUCATIONAL NOTES ON DUAL DATA STRUCTURES FOR VOXELS:
+    // ----------------------------------------------------
+    // This class uses two different data structures to store the same voxel data,
+    // each optimized for different access patterns:
+    //
+    // 1. voxels[8][256] - Organizes voxels by material and color
+    //    - Efficient for queries like "give me all voxels of material 2, color 37"
+    //    - Poor for spatial queries like "what's at position (x,y,z)?"
+    //
+    // 2. voxelsSpatial - Organizes voxels by their spatial position
+    //    - Efficient for spatial queries like "what's at position (x,y,z)?"
+    //    - Uses a map for memory efficiency with sparse data
+    //
+    // Tradeoffs:
+    // - Memory: We use more memory by storing voxels twice
+    // - Performance: We get optimal performance for both types of queries
+    // - Complexity: We need to maintain both structures in sync
+    //
+    // For novice programmers: This is a common technique in game/graphics programming
+    // where performance is critical. We're trading some extra memory for faster access.
+    
+    // Using a map for sparse 3D data instead of a fixed-size 3D array
+    // Key format: (x << 16) | (y << 8) | z
+    // This approach is memory-efficient for sparse data (mostly empty space)
+    // A 3D array would need 256³ = 16.7 million elements even if most are empty!
+
+
+    // todo we need to do morton decoing using chunkid to get x,y,z
+    std::map<uint32_t, std::vector<VmaxVoxel>> voxelsSpatial;
+    
     // Each model has local 0-7 materials
     std::array<VmaxMaterial, 8> materials;
     // Each model has local colors
     std::array<VmaxRGBA, 256> colors;
+    uint8_t maxx=0, maxy=0, maxz=0;
 
     // Constructor
     VmaxModel(const std::string& modelName) : vmaxbFileName(modelName) {
     }
     
+    // Helper function to create a key for the voxelsSpatial map
+    static uint32_t makeVoxelKey(uint8_t x, uint8_t y, uint8_t z) {
+        return (static_cast<uint32_t>(x) << 16) | (static_cast<uint32_t>(y) << 8) | static_cast<uint32_t>(z);
+    }
+    
     // Add a voxel to this model
+    // EDUCATIONAL NOTE:
+    // Notice how we maintain BOTH data structures when adding a voxel.
+    // This is a key practice when using dual data structures - keep them in sync
+    // by updating both whenever data changes.
     void addVoxel(int x, int y, int z, int material, int color, int chunk, int chunkMin) {
+
+        //todo add chunk offset to x,y,z
+        //chunkMin is offset withing each chunk used earlier
+        uint32_t _tempx, _tempy, _tempz;
+        decodeMorton3DOptimized(chunk, _tempx, _tempy, _tempz); // index IS the morton code
+        int worldOffsetX = _tempx * 24; // get world loc within 256x256x256 grid
+        int worldOffsetY = _tempy * 24; // Don't know why we need to multiply by 24
+        int worldOffsetZ = _tempz * 24; // use to be 32
+        x += worldOffsetX;
+        y += worldOffsetY;
+        z += worldOffsetZ;
+
+
         if (material >= 0 && material < 8 && color > 0 && color < 256) {
             voxels[material][color].emplace_back(x, y, z, material, color, chunk, chunkMin);
+            
+            // Add to voxelsSpatial using the map approach
+            uint32_t key = makeVoxelKey(x, y, z);
+            //todo add chunk offset to x,y,z
+            voxelsSpatial[key].emplace_back(x, y, z, material, color, chunk, chunkMin);
+            
+            if (x > maxx) maxx = x;
+            if (y > maxy) maxy = y;
+            if (z > maxz) maxz = z;
         }
     }
-
-    // Add a materials to this model
+    
+    // Get voxels at a specific position
+    // EDUCATIONAL NOTE:
+    // This method demonstrates the power of our spatial index.
+    // Time complexity: O(log n) where n is the number of occupied positions.
+    // Without voxelsSpatial, we would need to scan through ALL voxels (potentially thousands)
+    // to find those at a specific position, which would be O(total_voxel_count).
+    const std::vector<VmaxVoxel>& getVoxelsAt(uint8_t x, uint8_t y, uint8_t z) const {
+        uint32_t key = makeVoxelKey(x, y, z);
+        auto it = voxelsSpatial.find(key);
+        if (it != voxelsSpatial.end()) {
+            return it->second;
+        }
+        static const std::vector<VmaxVoxel> empty;
+        return empty;
+    }
+    
+    // Check if there are voxels at a specific position
+    // Another spatial query that benefits from our map-based structure
+    bool hasVoxelsAt(uint8_t x, uint8_t y, uint8_t z) const {
+        uint32_t key = makeVoxelKey(x, y, z);
+        auto it = voxelsSpatial.find(key);
+        return (it != voxelsSpatial.end() && !it->second.empty());
+    }
+    
+    // Add materials to this model
     void addMaterials(const std::array<VmaxMaterial, 8> newMaterials) {
         materials = newMaterials;
     }
     
-    // Add a colors to this model
+    // Add colors to this model
     void addColors(const std::array<VmaxRGBA, 256> newColors) {
         colors = newColors;
     }
-     
+    
     // Get all voxels of a specific material and color
     const std::vector<VmaxVoxel>& getVoxels(int material, int color) const {
         if (material >= 0 && material < 8 && color > 0 && color < 256) {
@@ -288,7 +384,7 @@ struct VmaxModel {
         }
         return count;
     }
-
+    
     // Get a map of used materials and their associated colors
     std::map<int, std::set<int>> getUsedMaterialsAndColors() const {
         std::map<int, std::set<int>> result;

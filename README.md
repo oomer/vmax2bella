@@ -18,7 +18,8 @@ workdir/
 ├── bella_scene_sdk/
 ├── libplist/
 ├── lzfse/
-└── vox2bella/
+├── opengametools/
+└── vmax2bella/
 ```
 
 # MacOS
@@ -42,6 +43,7 @@ cd libplist
 make -j4
 install_name_tool -id @rpath/libplist-2.0.4.dylib src/.libs/libplist-2.0.4.dylib
 cd ..
+git clone https://github.com/jpaver/opengametools.git
 git clone https://github.com/oomer/vmax2bella.git
 cd vmax2bella
 make
@@ -62,6 +64,7 @@ cd libplist
 ./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
 cd ..
+git clone https://github.com/jpaver/opengametools.git
 git clone https://github.com/oomer/vmax2bella.git
 cd vmax2bella
 make
@@ -74,7 +77,7 @@ make
 ```
 mkdir workdir
 git clone https://github.com/lzfse/lzfse
-
+git clone https://github.com/jpaver/opengametools.git
 git clone https://github.com/oomer/vmax2bella.git
 cd vmax2bella
 msbuild vox2bella.vcxproj /p:Configuration=release /p:Platform=x64 /p:PlatformToolset=v143
