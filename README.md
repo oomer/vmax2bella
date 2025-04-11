@@ -37,7 +37,7 @@ curl -L https://github.com/Homebrew/brew/tarball/master | tar xz --strip-compone
 eval "$(homebrew/bin/brew shellenv)"
 brew update --force --quiet
 brew install libtool autoconf automake
-git clone https://github.com/libimobiledevice/libplist
+git clone https://github.com/oomer/libplist
 cd libplist
 ./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
@@ -59,7 +59,7 @@ cd lzfse/build
 cmake ..
 make -j4
 cd ../..
-git clone https://github.com/libimobiledevice/libplist
+git clone https://github.com/oomer/libplist
 cd libplist
 ./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
@@ -82,13 +82,9 @@ cd lzfse/build
 cmake ..
 msbuild lzfse.vcxproj /p:Configuration=release /p:Platform=x64 /p:PlatformToolset=v143
 cd ../..
-git clone https://github.com/libimobiledevice/libplist
+git clone https://github.com/oomer/libplist
 git clone https://github.com/jpaver/opengametools.git
 git clone https://github.com/oomer/vmax2bella.git
-copy .\vmax2bella\patch_libplist\libplist.vcxproj .\libplist
-copy /Y .\vmax2bella\patch_libplist\config.h .\libplist\src\config.h
-copy /Y .\vmax2bella\patch_libplist\cnary.c .\libplist\libcnary\cnary.c
-copy /Y .\vmax2bella\patch_libplist\plist.c .\libplist\src\plist.c
 cd libplist
 msbuild libplist.vcxproj /p:Configuration=release /p:Platform=x64 /p:PlatformToolset=v143
 cd ..
