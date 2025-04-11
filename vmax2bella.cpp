@@ -176,6 +176,15 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 #include "../bella_scene_sdk/src/bella_sdk/bella_scene.h" // For creating and manipulating 3D scenes in Bella
 #include "../bella_scene_sdk/src/dl_core/dl_main.inl" // Core functionality from the Diffuse Logic engine
 
+#ifdef _WIN32
+#include <windows.h> // For ShellExecuteW
+#include <shellapi.h> // For ShellExecuteW
+#include <codecvt> // For wstring_convert
+#elif defined(__APPLE__) || defined(__linux__)
+#include <unistd.h> // For fork, exec
+#include <sys/wait.h> // For waitpid
+#endif
+
 #include "oomer_voxel_vmax.h"   // common vmax voxel code and structures
 #include "oomer_misc.h"         // common misc code
 #include "oomer_voxel_ogt.h"    // common opengametools voxel conversion wrappers
