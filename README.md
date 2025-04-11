@@ -85,9 +85,10 @@ cd ../..
 git clone https://github.com/libimobiledevice/libplist
 git clone https://github.com/jpaver/opengametools.git
 git clone https://github.com/oomer/vmax2bella.git
-cp vmax2bella/patch_libplist/libplist.vcxproj ../libplist
-cp vmax2bella/patch_libplist/cnary.c ../libplist/libcnary/cnary.c
-cp vmax2bella/patch_libplist/plist.c ../libplist/libcnary/plist.c
+copy .\vmax2bella\patch_libplist\libplist.vcxproj .\libplist
+copy /Y .\vmax2bella\patch_libplist\config.h .\libplist\src\config.h
+copy /Y .\vmax2bella\patch_libplist\cnary.c .\libplist\libcnary\cnary.c
+copy /Y .\vmax2bella\patch_libplist\plist.c .\libplist\src\plist.c
 cd libplist
 msbuild libplist.vcxproj /p:Configuration=release /p:Platform=x64 /p:PlatformToolset=v143
 cd ..
