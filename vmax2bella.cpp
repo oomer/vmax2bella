@@ -591,6 +591,7 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                                 canonicalName + dl::String("vmaxMat") + dl::String(material) + dl::String("Color") + dl::String(color));
                 bool isMesh = false;
                 bool isBox = true;
+                std::cout << vmaxMaterial[material].roughness << std::endl;
 
                 if(material==7) {
                     belMaterial["type"] = "liquid";
@@ -601,8 +602,8 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                     isBox = false;
                 } else if(material==6 || vmaxPalette[color-1].a < 255) {
                     belMaterial["type"] = "glass";
-                    belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
-                    belMaterial["glassDepth"] = 500.0f;
+                    belMaterial["roughness"] = vmaxMaterial[material].roughness/.9f * 100.0f;
+                    belMaterial["glassDepth"] = 1500.0f;
                 } else if(vmaxMaterial[material].metalness > 0.1f) {
                     belMaterial["type"] = "metal";
                     belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
@@ -613,12 +614,14 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                     belMaterial["type"] = "emitter";
                     belMaterial["emitterUnit"] = "radiance";
                     belMaterial["energy"] = vmaxMaterial[material].emission*1.0f;
+                } else if(vmaxMaterial[material].roughness > 0.8999f) {
+                    belMaterial["type"] = "diffuse";
                 } else {
                     belMaterial["type"] = "plastic";
                     belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
                 }
 
-                if (args.have("bevel")) {
+                if (args.have("bevel") && material != 7) {
                     belMaterial["bevel"] = belBevel;
                 }
                 if (args.have("mode") && args.value("mode") == "mesh" || args.value("mode") == "both") {
