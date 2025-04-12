@@ -1,13 +1,13 @@
 # vmax2bella
-[WORK IN PROGRESS, file format is currently not fully grokked]
 
-Command line convertor from [VoxelMax](https://voxelmax.com) .vmax to DiffuseLogic .bsz
+Command line convertor from [VoxelMax](https://voxelmax.com) .vmax to DiffuseLogic's [Bella](https://bellarender.com) .bsz
 
 ![example](resources/example.jpg)
 
 
-# Precompile binaries
+# Precompiled binaries
 [MacOS](https://a4g4.c14.e2-1.dev/vmax2bella/vmax2bella_macuniversal_0.1.zip)
+
 [Windows](https://a4g4.c14.e2-1.dev/vmax2bella/vmax2bella_win_alpha0.1.zip)
 
 
@@ -41,7 +41,7 @@ curl -L https://github.com/Homebrew/brew/tarball/master | tar xz --strip-compone
 eval "$(homebrew/bin/brew shellenv)"
 brew update --force --quiet
 brew install libtool autoconf automake
-git clone https://github.com/oomer/libplist
+git clone https://github.com/libimobiledevice/libplist.git
 cd libplist
 ./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
@@ -66,7 +66,7 @@ cd lzfse/build
 cmake ..
 make -j4
 cd ../..
-git clone https://github.com/oomer/libplist
+git clone https://github.com/libimobiledevice/libplist.git
 cd libplist
 ./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
