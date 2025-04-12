@@ -6,6 +6,10 @@ Command line convertor from [VoxelMax](https://voxelmax.com) .vmax to DiffuseLog
 ![example](resources/example.jpg)
 
 
+# Precompile binaries
+[MacOS](https://a4g4.c14.e2-1.dev/vmax2bella/vmax2bella_macuniversal_0.1.zip)
+[Windows](https://a4g4.c14.e2-1.dev/vmax2bella/vmax2bella_win_alpha0.1.zip)
+
 
 # Build
 
@@ -46,7 +50,10 @@ cd ..
 git clone https://github.com/jpaver/opengametools.git
 git clone https://github.com/oomer/vmax2bella.git
 cd vmax2bella
-make
+make all -j4
+install_name_tool -change ../lzfse/build/liblzfse.dylib @rpath/liblzfse.dylib bin/Darwin/release/vmax2bella
+install_name_tool -change /usr/local/lib/libplist-2.0.4.dylib @rpath/libplist-2.0.4.dylib bin/Darwin/release/vmax2bella
+
 ```
 
 # Linux [NOT READY]
@@ -70,7 +77,7 @@ cd vmax2bella
 make
 ```
 
-# Windows [NOT READY]
+# Windows 
 - Install Visual Studio Community 2022
 - Add Desktop development with C++ workload
 - Launch x64 Native tools Command Prompt for VS2022
