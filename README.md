@@ -5,10 +5,38 @@ Command line convertor from [VoxelMax](https://voxelmax.com) .vmax to DiffuseLog
 ![example](resources/example.jpg)
 
 
-# Precompiled binaries
+# Precompiled binaries ( Alpha release )
 [MacOS](https://a4g4.c14.e2-1.dev/vmax2bella/vmax2bella_macuniversal_0.1.zip)
 
 [Windows](https://a4g4.c14.e2-1.dev/vmax2bella/vmax2bella_win_alpha0.1.zip)
+
+
+# Usage
+
+```
+./vmax2bella -h  // show help
+./vmax2bella -i:bear.vmax // convert bear.vmax to bear.bsz using cubes
+./vmax2bella -i:bear.vmax --mode:mesh // convert to bear.bsz using mesh
+./vmax2bella -i:bear.vmax --mode:mesh --bevel // convert to bear.bsz using mesh and bevel shader
+```
+
+VoxelMax features supported
+- metallness converted to Bella metal quickmaterial (not PBR), roughness supported
+- Material 7 is Glass
+- Material 8 is Liquid and is always a mesh
+- 0 roughness is converted to Oren-Nayar diffuse
+- opacity < 255 turns into Glass
+- roughness > 0 converted to Bella Plastic
+- emitter supported
+
+Load **bear.bsz** into [bella_gui](https://bellarender.com/builds) for rendering
+
+- [TODO] convert scene.json camera
+- [TODO] output one .bsz file per chunk timeline for anim
+- [TODO] convert chunk camera for anim
+
+
+
 
 
 # Build
