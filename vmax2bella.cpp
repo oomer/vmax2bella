@@ -611,8 +611,8 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                     isBox = false;
                 } else if(material==6 || vmaxPalette[color-1].a < 255) {
                     belMaterial["type"] = "glass";
-                    belMaterial["roughness"] = vmaxMaterial[material].roughness/.9f * 100.0f;
-                    belMaterial["glassDepth"] = 1500.0f;
+                    belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
+                    belMaterial["glassDepth"] = 500.0f;
                 } else if(vmaxMaterial[material].metalness > 0.1f) {
                     belMaterial["type"] = "metal";
                     belMaterial["roughness"] = vmaxMaterial[material].roughness * 100.0f;
