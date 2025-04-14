@@ -202,7 +202,7 @@ dl::bella_sdk::Node oom::bella::essentialsToScene(dl::bella_sdk::Scene& belScene
 dl::bella_sdk::Node add_ogt_mesh_to_scene(dl::String bellaName, ogt_mesh* ogtMesh, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld );
 
 // Forward declaration
-dl::bella_sdk::Node addModelToScene(dl::Args& args, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const oom::vmax::VmaxModel& vmaxModel, const std::vector<oom::vmax::VmaxRGBA>& vmaxPalette, const std::array<oom::vmax::VmaxMaterial, 8>& vmaxMaterial); 
+dl::bella_sdk::Node addModelToScene(dl::Args& args, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const oom::vmax::Model& vmaxModel, const std::vector<oom::vmax::RGBA>& vmaxPalette, const std::array<oom::vmax::Material, 8>& vmaxMaterial); 
 
 int DL_main(dl::Args& args) {
     args.add("i", "input", "", "vmax directory or vmax.zip file");
@@ -259,7 +259,7 @@ int DL_main(dl::Args& args) {
         //  - reference to a paletteN.settings.vmaxpsb (plist file) that defines the 8 materials used in the "model"
         // In scenegraph parlance a group is a xform, a object is a transform with a child geometry 
         // multiple objects can point to the same model creating what is known as an instance
-        oom::vmax::JsonVmaxSceneParser vmaxSceneParser;
+        oom::vmax::JsonSceneParser vmaxSceneParser;
         vmaxSceneParser.parseScene((vmaxDirName+"/scene.json").buf());
 
         #ifdef _DEBUG
@@ -277,7 +277,7 @@ int DL_main(dl::Args& args) {
             belGroupNodes[belGroupUUID] = belScene.createNode("xform", belGroupUUID, belGroupUUID); // Create a Bella node for the group
 
 
-            oom::vmax::VmaxMatrix4x4 objectMat4 = oom::vmax::combineVmaxTransforms(groupInfo.rotation[0], 
+            oom::vmax::Matrix4x4 objectMat4 = oom::vmax::combineTransforms(groupInfo.rotation[0], 
                                               groupInfo.rotation[1], 
                                               groupInfo.rotation[2], 
                                               groupInfo.rotation[3],
@@ -320,9 +320,9 @@ int DL_main(dl::Args& args) {
         // This loop runs only 3 times (once per unique model), not 100 times (once per instance)
         
         auto modelVmaxbMap = vmaxSceneParser.getModelContentVMaxbMap(); 
-        std::vector<oom::vmax::VmaxModel> allModels;
-        std::vector<std::vector<oom::vmax::VmaxRGBA>> vmaxPalettes; // one palette per model
-        std::vector<std::array<oom::vmax::VmaxMaterial, 8>> vmaxMaterials; // one material per model
+        std::vector<oom::vmax::Model> allModels;
+        std::vector<std::vector<oom::vmax::RGBA>> vmaxPalettes; // one palette per model
+        std::vector<std::array<oom::vmax::Material, 8>> vmaxMaterials; // one material per model
 
         oom::bella::essentialsToScene(belScene); // create the basic scene elements in Bella
         
@@ -331,7 +331,7 @@ int DL_main(dl::Args& args) {
         // todo rename model to objects as per vmax
         for (const auto& [vmaxContentName, vmaxModelList] : modelVmaxbMap) { 
             std::cout << "vmaxContentName: " << vmaxContentName << std::endl;
-            oom::vmax::VmaxModel currentVmaxModel(vmaxContentName);
+            oom::vmax::Model currentVmaxModel(vmaxContentName);
             const auto& jsonModelInfo = vmaxModelList.front(); // get the first model, others are instances at the scene level
             std::vector<double> position = jsonModelInfo.position;
             std::vector<double> rotation = jsonModelInfo.rotation;
@@ -364,12 +364,12 @@ int DL_main(dl::Args& args) {
                 plist_t plist_datastream = oom::vmax::getNestedPlistNode(plist_snapshot, {"s", "ds"});
                 uint64_t chunkID;
                 plist_get_uint_val(plist_chunk, &chunkID);
-                oom::vmax::VmaxChunkInfo chunkInfo = oom::vmax::vmaxChunkInfo(plist_snapshot);
+                oom::vmax::ChunkInfo chunkInfo = oom::vmax::vmaxChunkInfo(plist_snapshot);
                 //std::cout << "\nChunkID: " << chunkInfo.id << std::endl;
                 //std::cout << "TypeID: " << chunkInfo.type << std::endl;
                 //std::cout << "MortonCode: " << chunkInfo.mortoncode << "\n" <<std::endl;
 
-                std::vector<oom::vmax::VmaxVoxel> xvoxels = oom::vmax::vmaxVoxelInfo(plist_datastream, chunkInfo.id, chunkInfo.mortoncode);
+                std::vector<oom::vmax::Voxel> xvoxels = oom::vmax::vmaxVoxelInfo(plist_datastream, chunkInfo.id, chunkInfo.mortoncode);
                 //std::cout << "xxxvoxels: " << xvoxels.size() << std::endl;
 
                 for (const auto& voxel : xvoxels) {
@@ -379,7 +379,7 @@ int DL_main(dl::Args& args) {
             allModels.push_back(currentVmaxModel);
             // Parse the materials store in paletteN.settings.vmaxpsb    
             plist_t plist_material = oom::vmax::readPlist(materialName.buf(),false); // decompress=false
-            std::array<oom::vmax::VmaxMaterial, 8> currentMaterials = oom::vmax::getVmaxMaterials(plist_material);
+            std::array<oom::vmax::Material, 8> currentMaterials = oom::vmax::getMaterials(plist_material);
             vmaxMaterials.push_back(currentMaterials);
         }
         //}
@@ -411,7 +411,7 @@ int DL_main(dl::Args& args) {
         // This is the instances of the models, we did a pass to create the canonical models earlier
         for (const auto& [vmaxContentName, vmaxModelList] : modelVmaxbMap) { 
             //std::cout << "model: " << vmaxContentName << std::endl;
-            oom::vmax::VmaxModel currentVmaxModel(vmaxContentName);
+            oom::vmax::Model currentVmaxModel(vmaxContentName);
             for(const auto& jsonModelInfo : vmaxModelList) {
                 std::vector<double> position = jsonModelInfo.position;
                 std::vector<double> rotation = jsonModelInfo.rotation;
@@ -432,7 +432,7 @@ int DL_main(dl::Args& args) {
                 auto belCanonicalNode = belCanonicalNodes[canonicalName.buf()];
                 auto foofoo = belScene.findNode(canonicalName);
 
-                oom::vmax::VmaxMatrix4x4 objectMat4 = oom::vmax::combineVmaxTransforms(rotation[0], 
+                oom::vmax::Matrix4x4 objectMat4 = oom::vmax::combineTransforms(rotation[0], 
                                                                  rotation[1], 
                                                                  rotation[2], 
                                                                  rotation[3],
@@ -479,9 +479,9 @@ int DL_main(dl::Args& args) {
 dl::bella_sdk::Node addModelToScene(dl::Args& args,
                                     dl::bella_sdk::Scene& belScene, 
                                     dl::bella_sdk::Node& belWorld, 
-                                    const oom::vmax::VmaxModel& vmaxModel, 
-                                    const std::vector<oom::vmax::VmaxRGBA>& vmaxPalette, 
-                                    const std::array<oom::vmax::VmaxMaterial, 8>& vmaxMaterial) {
+                                    const oom::vmax::Model& vmaxModel, 
+                                    const std::vector<oom::vmax::RGBA>& vmaxPalette, 
+                                    const std::array<oom::vmax::Material, 8>& vmaxMaterial) {
     // Create Bella scene nodes for each voxel
     int i = 0;
     dl::String modelName = dl::String(vmaxModel.vmaxbFileName.c_str());
@@ -559,7 +559,7 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                 }; // colors ready to use in Bella
 
                 // Get all voxels for this material/color combination
-                const std::vector<oom::vmax::VmaxVoxel>& voxelsOfType = vmaxModel.getVoxels(material, color);
+                const std::vector<oom::vmax::Voxel>& voxelsOfType = vmaxModel.getVoxels(material, color);
                 int showchunk =0;
 
                 if (isMesh) {
