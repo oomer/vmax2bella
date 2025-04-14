@@ -185,21 +185,27 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 #include <sys/wait.h> // For waitpid
 #endif
 
-#include "oomer_voxel_vmax.h"   // common vmax voxel code and structures
-#include "oomer_misc.h"         // common misc code
-#include "oomer_voxel_ogt.h"    // common opengametools voxel conversion wrappers
+
+
+#include "../oom/oom_bella_long.h"   
+#include "../oom/oom_bella_scene.h"   
+#include "../oom/oom_misc.h"         // common misc code
+#include "../oom/oom_license.h"         // common misc code
+#include "../oom/oom_voxel_vmax.h"   // common vmax voxel code and structures
+#include "../oom/oom_voxel_ogt.h"    // common opengametools voxel conversion wrappers
 
 #define OGT_VOX_IMPLEMENTATION
 #include "../opengametools/src/ogt_vox.h"
 
-
-dl::bella_sdk::Node essentialsToScene(dl::bella_sdk::Scene& belScene);
-dl::bella_sdk::Node addModelToScene(dl::Args& args, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const VmaxModel& vmaxModel, const std::vector<VmaxRGBA>& vmaxPalette, const std::array<VmaxMaterial, 8>& vmaxMaterial); 
+// oomer helper functions from ../oom
+dl::bella_sdk::Node oom::bella::essentialsToScene(dl::bella_sdk::Scene& belScene);
 dl::bella_sdk::Node add_ogt_mesh_to_scene(dl::String bellaName, ogt_mesh* ogtMesh, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld );
+
+// Forward declaration
+dl::bella_sdk::Node addModelToScene(dl::Args& args, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const oom::vmax::VmaxModel& vmaxModel, const std::vector<oom::vmax::VmaxRGBA>& vmaxPalette, const std::array<oom::vmax::VmaxMaterial, 8>& vmaxMaterial); 
 
 int DL_main(dl::Args& args) {
     args.add("i", "input", "", "vmax directory or vmax.zip file");
-    args.add("o", "output", "", "set output bella file name");
     args.add("mo", "mode", "", "mode for output, mesh, voxel, or both");
     args.add("mt", "meshtype", "", "meshtype classic, greedy, other");
     args.add("be", "bevel", "", "add bevel to material");
@@ -215,14 +221,17 @@ int DL_main(dl::Args& args) {
     // If --licenseinfo was requested, print license info and exit
     if (args.have("--licenseinfo"))
     {
-        std::cout << initializeGlobalLicense() << std::endl;
+        std::cout << oom::license::printLicense() << std::endl;
         return 0;
     }
  
     // If --thirdparty was requested, print third-party licenses and exit
     if (args.have("--thirdparty"))
     {
-        std::cout << initializeGlobalThirdPartyLicences() << std::endl;
+        std::cout << oom::license::printBellaSDK() << "\n====\n" << std::endl;
+        std::cout << oom::license::printLZFSE() << "\n====\n" << std::endl;
+        std::cout << oom::license::printLibPlist() << "\n====\n" << std::endl;
+        std::cout << oom::license::printOpenGameTools() << "\n====\n" << std::endl;
         return 0;
     }
 
@@ -250,13 +259,13 @@ int DL_main(dl::Args& args) {
         //  - reference to a paletteN.settings.vmaxpsb (plist file) that defines the 8 materials used in the "model"
         // In scenegraph parlance a group is a xform, a object is a transform with a child geometry 
         // multiple objects can point to the same model creating what is known as an instance
-        JsonVmaxSceneParser vmaxSceneParser;
+        oom::vmax::JsonVmaxSceneParser vmaxSceneParser;
         vmaxSceneParser.parseScene((vmaxDirName+"/scene.json").buf());
 
         #ifdef _DEBUG
             vmaxSceneParser.printSummary();
         #endif
-        std::map<std::string, JsonGroupInfo> jsonGroups = vmaxSceneParser.getGroups();
+        std::map<std::string, oom::vmax::JsonGroupInfo> jsonGroups = vmaxSceneParser.getGroups();
         std::map<dl::String, dl::bella_sdk::Node> belGroupNodes; // Map of UUID to bella node
         std::map<dl::String, dl::bella_sdk::Node> belCanonicalNodes; // Map of UUID to bella node
 
@@ -268,7 +277,7 @@ int DL_main(dl::Args& args) {
             belGroupNodes[belGroupUUID] = belScene.createNode("xform", belGroupUUID, belGroupUUID); // Create a Bella node for the group
 
 
-            VmaxMatrix4x4 objectMat4 = combineVmaxTransforms(groupInfo.rotation[0], 
+            oom::vmax::VmaxMatrix4x4 objectMat4 = oom::vmax::combineVmaxTransforms(groupInfo.rotation[0], 
                                               groupInfo.rotation[1], 
                                               groupInfo.rotation[2], 
                                               groupInfo.rotation[3],
@@ -311,18 +320,18 @@ int DL_main(dl::Args& args) {
         // This loop runs only 3 times (once per unique model), not 100 times (once per instance)
         
         auto modelVmaxbMap = vmaxSceneParser.getModelContentVMaxbMap(); 
-        std::vector<VmaxModel> allModels;
-        std::vector<std::vector<VmaxRGBA>> vmaxPalettes; // one palette per model
-        std::vector<std::array<VmaxMaterial, 8>> vmaxMaterials; // one material per model
+        std::vector<oom::vmax::VmaxModel> allModels;
+        std::vector<std::vector<oom::vmax::VmaxRGBA>> vmaxPalettes; // one palette per model
+        std::vector<std::array<oom::vmax::VmaxMaterial, 8>> vmaxMaterials; // one material per model
 
-        essentialsToScene(belScene); // create the basic scene elements in Bella
+        oom::bella::essentialsToScene(belScene); // create the basic scene elements in Bella
         
         // Loop over each model defined in scene.json and process the first instance 
         // This will be out canonical models, not instances
         // todo rename model to objects as per vmax
         for (const auto& [vmaxContentName, vmaxModelList] : modelVmaxbMap) { 
             std::cout << "vmaxContentName: " << vmaxContentName << std::endl;
-            VmaxModel currentVmaxModel(vmaxContentName);
+            oom::vmax::VmaxModel currentVmaxModel(vmaxContentName);
             const auto& jsonModelInfo = vmaxModelList.front(); // get the first model, others are instances at the scene level
             std::vector<double> position = jsonModelInfo.position;
             std::vector<double> rotation = jsonModelInfo.rotation;
@@ -335,13 +344,13 @@ int DL_main(dl::Args& args) {
 
             // Get this models colors from the paletteN.png 
             dl::String pngName = vmaxDirName + "/" + jsonModelInfo.paletteFile.c_str();
-            vmaxPalettes.push_back(read256x1PaletteFromPNG(pngName.buf())); // gather all models palettes
+            vmaxPalettes.push_back(oom::vmax::read256x1PaletteFromPNG(pngName.buf())); // gather all models palettes
             //allPalettes.push_back(read256x1PaletteFromPNG(pngName.buf())); // gather all models palettes
             if (vmaxPalettes.empty()) { throw std::runtime_error("Failed to read palette from: png " ); }
 
             // Read contentsN.vmaxb plist file, lzfse compressed
             dl::String modelFileName = vmaxDirName + "/" + jsonModelInfo.dataFile.c_str();
-            plist_t plist_model_root = readPlist(modelFileName.buf(), true); // decompress=true
+            plist_t plist_model_root = oom::vmax::readPlist(modelFileName.buf(), true); // decompress=true
 
             plist_t plist_snapshots_array = plist_dict_get_item(plist_model_root, "snapshots");
             uint32_t snapshots_array_size = plist_array_get_size(plist_snapshots_array);
@@ -351,17 +360,16 @@ int DL_main(dl::Args& args) {
             //VmaxModel currentVmaxModel(vmaxContentName);
             for (uint32_t i = 0; i < snapshots_array_size; i++) {
                 plist_t plist_snapshot = plist_array_get_item(plist_snapshots_array, i);
-                plist_t plist_chunk = getNestedPlistNode(plist_snapshot, {"s", "id", "c"});
-                plist_t plist_datastream = getNestedPlistNode(plist_snapshot, {"s", "ds"});
+                plist_t plist_chunk = oom::vmax::getNestedPlistNode(plist_snapshot, {"s", "id", "c"});
+                plist_t plist_datastream = oom::vmax::getNestedPlistNode(plist_snapshot, {"s", "ds"});
                 uint64_t chunkID;
                 plist_get_uint_val(plist_chunk, &chunkID);
-                VmaxChunkInfo chunkInfo = vmaxChunkInfo(plist_snapshot);
+                oom::vmax::VmaxChunkInfo chunkInfo = oom::vmax::vmaxChunkInfo(plist_snapshot);
                 //std::cout << "\nChunkID: " << chunkInfo.id << std::endl;
                 //std::cout << "TypeID: " << chunkInfo.type << std::endl;
                 //std::cout << "MortonCode: " << chunkInfo.mortoncode << "\n" <<std::endl;
 
-
-                std::vector<VmaxVoxel> xvoxels = vmaxVoxelInfo(plist_datastream, chunkInfo.id, chunkInfo.mortoncode);
+                std::vector<oom::vmax::VmaxVoxel> xvoxels = oom::vmax::vmaxVoxelInfo(plist_datastream, chunkInfo.id, chunkInfo.mortoncode);
                 //std::cout << "xxxvoxels: " << xvoxels.size() << std::endl;
 
                 for (const auto& voxel : xvoxels) {
@@ -370,8 +378,8 @@ int DL_main(dl::Args& args) {
             }
             allModels.push_back(currentVmaxModel);
             // Parse the materials store in paletteN.settings.vmaxpsb    
-            plist_t plist_material = readPlist(materialName.buf(),false); // decompress=false
-            std::array<VmaxMaterial, 8> currentMaterials = getVmaxMaterials(plist_material);
+            plist_t plist_material = oom::vmax::readPlist(materialName.buf(),false); // decompress=false
+            std::array<oom::vmax::VmaxMaterial, 8> currentMaterials = oom::vmax::getVmaxMaterials(plist_material);
             vmaxMaterials.push_back(currentMaterials);
         }
         //}
@@ -395,7 +403,6 @@ int DL_main(dl::Args& args) {
             // TODO add to a map00000 of canonical models
             dl::String lllmodelName = dl::String(eachModel.vmaxbFileName.c_str());
             dl::String lllcanonicalName = lllmodelName.replace(".vmaxb", "");
-            std::cout << "========lllcanonicalName: " << lllcanonicalName.buf() << std::endl;
             belCanonicalNodes[lllcanonicalName.buf()] = belModel;
             modelIndex++;
         }
@@ -404,7 +411,7 @@ int DL_main(dl::Args& args) {
         // This is the instances of the models, we did a pass to create the canonical models earlier
         for (const auto& [vmaxContentName, vmaxModelList] : modelVmaxbMap) { 
             //std::cout << "model: " << vmaxContentName << std::endl;
-            VmaxModel currentVmaxModel(vmaxContentName);
+            oom::vmax::VmaxModel currentVmaxModel(vmaxContentName);
             for(const auto& jsonModelInfo : vmaxModelList) {
                 std::vector<double> position = jsonModelInfo.position;
                 std::vector<double> rotation = jsonModelInfo.rotation;
@@ -425,7 +432,7 @@ int DL_main(dl::Args& args) {
                 auto belCanonicalNode = belCanonicalNodes[canonicalName.buf()];
                 auto foofoo = belScene.findNode(canonicalName);
 
-                VmaxMatrix4x4 objectMat4 = combineVmaxTransforms(rotation[0], 
+                oom::vmax::VmaxMatrix4x4 objectMat4 = oom::vmax::combineVmaxTransforms(rotation[0], 
                                                                  rotation[1], 
                                                                  rotation[2], 
                                                                  rotation[3],
@@ -460,105 +467,6 @@ int DL_main(dl::Args& args) {
     return 0;
 }
 
-
-
-// @param belScene - the scene to create the essentials in
-// @return - the world node
-dl::bella_sdk::Node essentialsToScene(dl::bella_sdk::Scene& belScene) {
-    // Create the basic scene elements in Bella
-    // Each line creates a different type of node in the scene auto belBeautyPass     = belScene.createNode("beautyPass","oomerBeautyPass","oomerBeautyPass");
-    auto belWorld = belScene.world();       // Get scene world root
-    {
-        dl::bella_sdk::Scene::EventScope es(belScene);
-
-        auto belCamForm    = belScene.createNode("xform","oomerCameraXform","oomerCameraXform");
-        auto belCam        = belScene.createNode("camera","oomerCamera","oomerCamera");
-        auto belSensor         = belScene.createNode("sensor","oomerSensor","oomerSensor");
-        auto belLens           = belScene.createNode("thinLens","oomerThinLens","oomerThinLens");
-        auto belImageDome      = belScene.createNode("imageDome","oomerImageDome","oomerImageDome");
-        auto belGroundPlane    = belScene.createNode("groundPlane","oomerGroundPlane","oomerGroundPlane");
-
-        auto belBeautyPass     = belScene.createNode("beautyPass","oomerBeautyPass","oomerBeautyPass");
-        auto belGroundMat      = belScene.createNode("quickMaterial","oomerGroundMat","oomerGroundMat");
-        auto belSun            = belScene.createNode("sun","oomerSun","oomerSun");
-        auto belColorDome   = belScene.createNode("colorDome","oomerColorDome","oomerColorDome");
-        auto belSettings = belScene.settings(); // Get scene settings
-        // Configure camera
-        belCam["resolution"]    = dl::Vec2 {1920, 1080};  // Set resolution to 1080p
-        belCam["lens"]          = belLens;               // Connect camera to lens
-        belCam["sensor"]        = belSensor;             // Connect camera to sensor
-        belCamForm.parentTo(belWorld);                  // Parent camera transform to world
-        belCam.parentTo(belCamForm);                   // Parent camera to camera transform
-
-        // Position the camera with a transformation matrix
-        belCamForm["steps"][0]["xform"] = dl::Mat4 {0.525768608156, -0.850627633385, 0, 0, -0.234464751651, -0.144921468924, -0.961261695938, 0, 0.817675761479, 0.505401223947, -0.275637355817, 0, -88.12259018466, -54.468125200218, 50.706001690932, 1};
-
-        // Configure environment (image-based lighting)
-        belImageDome["ext"]            = ".jpg";
-        belImageDome["dir"]            = "./res";
-        belImageDome["multiplier"]     = 6.0f;
-        belImageDome["file"]           = "DayEnvironmentHDRI019_1K-TONEMAPPED";
-        belImageDome["overrides"]["background"]     = belColorDome;
-        belColorDome["zenith"] = dl::Rgba{1.0f, 1.0f, 1.0f, 1.0f};
-        belColorDome["horizon"] = dl::Rgba{.85f, 0.76f, 0.294f, 1.0f};
-        belColorDome["altitude"] = 14.0f;
-        // Configure ground plane
-        //belGroundPlane["elevation"]    = -.5f;
-        belGroundPlane["material"]     = belGroundMat;
-
-        /* Commented out: Sun configuration
-        belSun["size"]    = 20.0f;
-        belSun["month"]    = "july";
-        belSun["rotation"]    = 50.0f;*/
-
-        // Configure materials
-        belGroundMat["type"] = "metal";
-        belGroundMat["roughness"] = 22.0f;
-        belGroundMat["color"] = dl::Rgba{0.138431623578, 0.5, 0.3, 1.0};
-
-        // Set up scene settings
-        belSettings["beautyPass"]  = belBeautyPass;
-        belSettings["camera"]      = belCam;
-        belSettings["environment"] = belColorDome;
-        belSettings["iprScale"]    = 100.0f;
-        belSettings["threads"]     = dl::bella_sdk::Input(0);  // Auto-detect thread count
-        belSettings["groundPlane"] = belGroundPlane;
-        belSettings["iprNavigation"] = "maya";  // Use Maya-like navigation in viewer
-        //settings["sun"] = sun;
-
-        auto belVoxel          = belScene.createNode("box","oomerVoxel","oomerVoxel");
-        auto belLiqVoxel       = belScene.createNode("box","oomerLiqVoxel","oomerLiqVoxel");
-        auto belVoxelForm      = belScene.createNode("xform","oomerVoxelXform","oomerVoxelXform");
-        auto belLiqVoxelForm   = belScene.createNode("xform","oomerLiqVoxelXform","oomerLiqVoxelXform");
-        auto belVoxelMat       = belScene.createNode("orenNayar","oomerVoxelMat","oomerVoxelMat");
-        auto belMeshVoxel   = belScene.createNode("mesh", "oomerMeshVoxel");
-        auto belBevel = belScene.createNode("bevel", "oomerBevel");
-        belBevel["radius"] = 90.0f;
-        belBevel["samples"] =dl::UInt(6); 
-
-        #include "resources/smoothcube.h"
-       // Configure voxel box dimensions
-        belVoxel["radius"]  = 0.33f;
-        belVoxel["sizeX"]   = 0.99f;
-        belVoxel["sizeY"]   = 0.99f;
-        belVoxel["sizeZ"]   = 0.99f;
-
-        // Less gap to make liquid look better, allows more light to pass through
-        belLiqVoxel["sizeX"]    = 0.99945f;
-        belLiqVoxel["sizeY"]    = 0.99945f;
-        belLiqVoxel["sizeZ"]    = 0.99945f;
-
-        belVoxel.parentTo(belVoxelForm);
-        belVoxelForm["steps"][0]["xform"] = dl::Mat4 {0.999,0,0,0,0,0.999,0,0,0,0,0.999,0,0,0,0,1};
-        belVoxelMat["reflectance"] = dl::Rgba{0.0, 0.0, 0.0, 1.0};
-        belVoxelForm["material"] = belVoxelMat;
-
-
-    }
-    return belWorld;
-}
-
-
 // Only add the canonical model to the scene
 // We'll use xforms to instance the model
 // Each model is stores in contentsN.vmaxb as a lzfe compressed plist
@@ -571,9 +479,9 @@ dl::bella_sdk::Node essentialsToScene(dl::bella_sdk::Scene& belScene) {
 dl::bella_sdk::Node addModelToScene(dl::Args& args,
                                     dl::bella_sdk::Scene& belScene, 
                                     dl::bella_sdk::Node& belWorld, 
-                                    const VmaxModel& vmaxModel, 
-                                    const std::vector<VmaxRGBA>& vmaxPalette, 
-                                    const std::array<VmaxMaterial, 8>& vmaxMaterial) {
+                                    const oom::vmax::VmaxModel& vmaxModel, 
+                                    const std::vector<oom::vmax::VmaxRGBA>& vmaxPalette, 
+                                    const std::array<oom::vmax::VmaxMaterial, 8>& vmaxMaterial) {
     // Create Bella scene nodes for each voxel
     int i = 0;
     dl::String modelName = dl::String(vmaxModel.vmaxbFileName.c_str());
@@ -644,14 +552,14 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                 double bellaB = static_cast<double>(vmaxPalette[color-1].b)/255.0;
                 double bellaA = static_cast<double>(vmaxPalette[color-1].a)/255.0;
                 belMaterial["color"] = dl::Rgba{ // convert sRGB to linear
-                    srgbToLinear(bellaR), 
-                    srgbToLinear(bellaG), 
-                    srgbToLinear(bellaB), 
+                    oom::misc::srgbToLinear(bellaR), 
+                    oom::misc::srgbToLinear(bellaG), 
+                    oom::misc::srgbToLinear(bellaB), 
                     bellaA // alpha is already linear
                 }; // colors ready to use in Bella
 
                 // Get all voxels for this material/color combination
-                const std::vector<VmaxVoxel>& voxelsOfType = vmaxModel.getVoxels(material, color);
+                const std::vector<oom::vmax::VmaxVoxel>& voxelsOfType = vmaxModel.getVoxels(material, color);
                 int showchunk =0;
 
                 if (isMesh) {
@@ -661,7 +569,7 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
 
                     std::cout << "Converting voxels to mesh\n";
                     // Convert voxels of a particular color to ogt_vox_model
-                    ogt_vox_model* ogt_model = convert_voxelsoftype_to_ogt_vox(voxelsOfType);
+                    ogt_vox_model* ogt_model = oom::ogt::convert_voxelsoftype_to_ogt_vox(voxelsOfType);
                     ogt_mesh_rgba* palette = new ogt_mesh_rgba[256]; // Create a palette array
                     for (int i = 0; i < 256; i++) { // Copy palette from Vmax to OGT
                         palette[i] = ogt_mesh_rgba{vmaxPalette[i].r, vmaxPalette[i].g, vmaxPalette[i].b, vmaxPalette[i].a};

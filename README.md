@@ -71,11 +71,15 @@ brew update --force --quiet
 brew install libtool autoconf automake
 git clone https://github.com/libimobiledevice/libplist.git
 cd libplist
+export CFLAGS="-arch arm64 -arch x86_64"                                        
+export CXXFLAGS="-arch arm64 -arch x86_64"
+export LDFLAGS="-arch arm64 -arch x86_64"
 ./autogen.sh --prefix=$PWD/install --without-cython
 make -j4
 install_name_tool -id @rpath/libplist-2.0.4.dylib src/.libs/libplist-2.0.4.dylib
 cd ..
 git clone https://github.com/jpaver/opengametools.git
+git clone https://github.com/oomer/oom.git
 git clone https://github.com/oomer/vmax2bella.git
 cd vmax2bella
 make all -j4
@@ -100,6 +104,7 @@ cd libplist
 make -j4
 cd ..
 git clone https://github.com/jpaver/opengametools.git
+git clone https://github.com/oomer/oom.git
 git clone https://github.com/oomer/vmax2bella.git
 cd vmax2bella
 make
@@ -119,6 +124,7 @@ msbuild lzfse.vcxproj /p:Configuration=release /p:Platform=x64 /p:PlatformToolse
 cd ../..
 git clone https://github.com/oomer/libplist
 git clone https://github.com/jpaver/opengametools.git
+git clone https://github.com/oomer/oom.git
 git clone https://github.com/oomer/vmax2bella.git
 cd libplist
 msbuild libplist.vcxproj /p:Configuration=release /p:Platform=x64 /p:PlatformToolset=v143
