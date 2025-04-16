@@ -185,8 +185,6 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 #include <sys/wait.h> // For waitpid
 #endif
 
-
-
 #include "../oom/oom_bella_long.h"   
 #include "../oom/oom_bella_scene.h"   
 #include "../oom/oom_misc.h"         // common misc code
@@ -198,13 +196,26 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 #include "../opengametools/src/ogt_vox.h"
 
 // oomer helper functions from ../oom
-dl::bella_sdk::Node oom::bella::essentialsToScene(dl::bella_sdk::Scene& belScene);
-dl::bella_sdk::Node add_ogt_mesh_to_scene(dl::String bellaName, ogt_mesh* ogtMesh, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld );
+dl::bella_sdk::Node oom::bella::defaultScene2025(dl::bella_sdk::Scene& belScene);
+dl::bella_sdk::Node add_ogt_mesh_to_scene(  dl::String bellaName, 
+                                            ogt_mesh* ogtMesh, 
+                                            dl::bella_sdk::Scene& belScene, 
+                                            dl::bella_sdk::Node& belWorld );
 
 // Forward declaration
-dl::bella_sdk::Node addModelToScene(dl::Args& args, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const oom::vmax::Model& vmaxModel, const std::vector<oom::vmax::RGBA>& vmaxPalette, const std::array<oom::vmax::Material, 8>& vmaxMaterial); 
+dl::bella_sdk::Node addModelToScene(dl::Args& args, 
+                                    dl::bella_sdk::Scene& belScene, 
+                                    dl::bella_sdk::Node& belWorld, 
+                                    const oom::vmax::Model& vmaxModel, 
+                                    const std::vector<oom::vmax::RGBA>& vmaxPalette, 
+                                    const std::array<oom::vmax::Material, 8>& vmaxMaterial); 
 
 int DL_main(dl::Args& args) {
+
+    int s_oomBellaLogContext = 0; 
+    dl::subscribeLog(&s_oomBellaLogContext, oom::bella::log);
+    dl::flushStartupMessages();
+
     args.add("i", "input", "", "vmax directory or vmax.zip file");
     args.add("mo", "mode", "", "mode for output, mesh, voxel, or both");
     args.add("mt", "meshtype", "", "meshtype classic, greedy, other");
@@ -324,7 +335,7 @@ int DL_main(dl::Args& args) {
         std::vector<std::vector<oom::vmax::RGBA>> vmaxPalettes; // one palette per model
         std::vector<std::array<oom::vmax::Material, 8>> vmaxMaterials; // one material per model
 
-        oom::bella::essentialsToScene(belScene); // create the basic scene elements in Bella
+        oom::bella::defaultScene2025(belScene); // create the basic scene elements in Bella
         
         // Loop over each model defined in scene.json and process the first instance 
         // This will be out canonical models, not instances
@@ -354,7 +365,6 @@ int DL_main(dl::Args& args) {
 
             plist_t plist_snapshots_array = plist_dict_get_item(plist_model_root, "snapshots");
             uint32_t snapshots_array_size = plist_array_get_size(plist_snapshots_array);
-            //std::cout << "snapshots_array_size: " << snapshots_array_size << std::endl;
 
             // Create a VmaxModel object
             //VmaxModel currentVmaxModel(vmaxContentName);
@@ -365,12 +375,7 @@ int DL_main(dl::Args& args) {
                 uint64_t chunkID;
                 plist_get_uint_val(plist_chunk, &chunkID);
                 oom::vmax::ChunkInfo chunkInfo = oom::vmax::vmaxChunkInfo(plist_snapshot);
-                //std::cout << "\nChunkID: " << chunkInfo.id << std::endl;
-                //std::cout << "TypeID: " << chunkInfo.type << std::endl;
-                //std::cout << "MortonCode: " << chunkInfo.mortoncode << "\n" <<std::endl;
-
                 std::vector<oom::vmax::Voxel> xvoxels = oom::vmax::vmaxVoxelInfo(plist_datastream, chunkInfo.id, chunkInfo.mortoncode);
-                //std::cout << "xxxvoxels: " << xvoxels.size() << std::endl;
 
                 for (const auto& voxel : xvoxels) {
                     currentVmaxModel.addVoxel(voxel.x, voxel.y, voxel.z, voxel.material, voxel.palette ,chunkInfo.id, chunkInfo.mortoncode);
@@ -391,8 +396,8 @@ int DL_main(dl::Args& args) {
         // First create canonical models and they are NOT attached to belWorld
         for (const auto& eachModel : allModels) {
             //if (modelIndex == 0) { // only process the first model
-            std::cout << modelIndex << "Model: " << eachModel.vmaxbFileName << std::endl;
-            std::cout << "Voxel Count Model: " << eachModel.getTotalVoxelCount() << std::endl;
+            std::cout << modelIndex << " Model: " << eachModel.vmaxbFileName << std::endl;
+            //std::cout << "Voxel Count Model: " << eachModel.getTotalVoxelCount() << std::endl;
             
             dl::bella_sdk::Node belModel = addModelToScene( args,
                                                             belScene, 
@@ -508,7 +513,6 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                                 canonicalName + dl::String("vmaxMat") + dl::String(material) + dl::String("Color") + dl::String(color));
                 bool isMesh = false;
                 bool isBox = true;
-                std::cout << vmaxMaterial[material].roughness << std::endl;
 
                 if(material==7) {
                     belMaterial["type"] = "liquid";
@@ -530,7 +534,7 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                 } else if(vmaxMaterial[material].emission > 0.0f) {
                     belMaterial["type"] = "emitter";
                     belMaterial["emitterUnit"] = "radiance";
-                    belMaterial["energy"] = vmaxMaterial[material].emission*1.0f;
+                    belMaterial["emitterEnergy"] = vmaxMaterial[material].emission*1.0f;
                 } else if(vmaxMaterial[material].roughness > 0.8999f) {
                     belMaterial["type"] = "diffuse";
                 } else {
@@ -567,7 +571,6 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                         thisname+dl::String("Xform"));
                     belMeshXform.parentTo(modelXform);
 
-                    std::cout << "Converting voxels to mesh\n";
                     // Convert voxels of a particular color to ogt_vox_model
                     ogt_vox_model* ogt_model = oom::ogt::convert_voxelsoftype_to_ogt_vox(voxelsOfType);
                     ogt_mesh_rgba* palette = new ogt_mesh_rgba[256]; // Create a palette array
@@ -603,7 +606,6 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                     belInstancer["steps"][0]["xform"] = dl::Mat4 {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
                     belInstancer.parentTo(modelXform);
 
-                    std::cout << "Converting voxels to bella boxes\n";
                     //WARNING we use to do morton decoding above but now VoxModel does it when addVoxel is called
                     // So we can just use the x,y,z values
                     for (const auto& eachvoxel : voxelsOfType) {
@@ -632,7 +634,10 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
     return dl::bella_sdk::Node();
 }
 
-dl::bella_sdk::Node add_ogt_mesh_to_scene(dl::String name, ogt_mesh* meshmesh, dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld ) {
+dl::bella_sdk::Node add_ogt_mesh_to_scene(  dl::String name, 
+                                            ogt_mesh* meshmesh, 
+                                            dl::bella_sdk::Scene& belScene, 
+                                            dl::bella_sdk::Node& belWorld ) {
 
     //auto ogtXform = belScene.createNode("xform", name+"ogtXform", name+"ogtXform");
     //ogtXform["steps"][0]["xform"] = dl::Mat4 {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
@@ -663,6 +668,5 @@ dl::bella_sdk::Node add_ogt_mesh_to_scene(dl::String name, ogt_mesh* meshmesh, d
                                         static_cast<unsigned int>(meshmesh->indices[i+2]) });
     }
     ogtMesh["polygons"] = facesArray;
-
     return ogtMesh;
 }
