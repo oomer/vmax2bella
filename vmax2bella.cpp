@@ -185,18 +185,25 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 #include <sys/wait.h> // For waitpid
 #endif
 
+// oomer's helper utility code to make main cpp smaller
 #include "../oom/oom_bella_long.h"   
-#include "../oom/oom_bella_scene.h"   
 #include "../oom/oom_misc.h"         // common misc code
 #include "../oom/oom_license.h"         // common misc code
 #include "../oom/oom_voxel_vmax.h"   // common vmax voxel code and structures
 #include "../oom/oom_voxel_ogt.h"    // common opengametools voxel conversion wrappers
+#include "../oom/oom_bella_long.h"    // more oomer's helper code for bella, but has long data
+#include "../oom/oom_bella_premade.h" // oomer's helper code for bella scenes
+#include "../oom/oom_bella_misc.h"    // oomer's hlper code for bella misc code
 
 #define OGT_VOX_IMPLEMENTATION
 #include "../opengametools/src/ogt_vox.h"
 
+//==============================================================================
+// GLOBAL VARIABLES AND FUNCTIONS
+//==============================================================================
+
 // oomer helper functions from ../oom
-dl::bella_sdk::Node oom::bella::defaultScene2025(dl::bella_sdk::Scene& belScene);
+//dl::bella_sdk::Node oom::bella::defaultSceneVoxel(dl::bella_sdk::Scene& belScene);
 dl::bella_sdk::Node add_ogt_mesh_to_scene(  dl::String bellaName, 
                                             ogt_mesh* ogtMesh, 
                                             dl::bella_sdk::Scene& belScene, 
@@ -209,6 +216,10 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                                     const oom::vmax::Model& vmaxModel, 
                                     const std::vector<oom::vmax::RGBA>& vmaxPalette, 
                                     const std::array<oom::vmax::Material, 8>& vmaxMaterial); 
+
+//==============================================================================
+// MAIN FUNCTION
+//==============================================================================
 
 int DL_main(dl::Args& args) {
 
@@ -223,20 +234,17 @@ int DL_main(dl::Args& args) {
     args.add("tp",  "thirdparty",   "",   "prints third party licenses");
     args.add("li",  "licenseinfo",   "",   "prints license info");
 
-    // If --help was requested, print help and exit
     if (args.helpRequested()) {
         std::cout << args.help("vmax2bella © 2025 Harvey Fong","vmax2bella", "1.0") << std::endl;
         return 0;
     }
     
-    // If --licenseinfo was requested, print license info and exit
     if (args.have("--licenseinfo"))
     {
         std::cout << oom::license::printLicense() << std::endl;
         return 0;
     }
  
-    // If --thirdparty was requested, print third-party licenses and exit
     if (args.have("--thirdparty"))
     {
         std::cout << oom::license::printBellaSDK() << "\n====\n" << std::endl;
@@ -258,7 +266,15 @@ int DL_main(dl::Args& args) {
         // Create a new scene
         dl::bella_sdk::Scene belScene;
         belScene.loadDefs();
-        auto belWorld = belScene.world(true);
+
+        auto [  belWorld,
+                belMeshVoxel,
+                belLiqVoxel,
+                belVoxel,
+                belEmitterBlockXform ] = oom::bella::defaultSceneVoxel(belScene);
+
+
+        //auto belWorld = belScene.world(true);
 
         // scene.json is the toplevel file that hierarchically defines the scene
         // it contains nestable groups (containers) and objects (instances) that point to resources that define the object
@@ -495,12 +511,12 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
     {
         dl::bella_sdk::Scene::EventScope es(belScene);
 
-        auto belVoxel = belScene.findNode("oomerVoxel");
-        auto belLiqVoxel = belScene.findNode("oomerLiqVoxel");
-        auto belMeshVoxel = belScene.findNode("oomerMeshVoxel");
-        auto belVoxelForm = belScene.findNode("oomerVoxelXform");
-        auto belLiqVoxelForm = belScene.findNode("oomerLiqVoxelXform");
-        auto belBevel = belScene.findNode("oomerBevel");
+        auto belVoxel = belScene.findNode("oomVoxel");
+        auto belLiqVoxel = belScene.findNode("oomLiqVoxel");
+        auto belMeshVoxel = belScene.findNode("oomMeshVoxel");
+        auto belVoxelForm = belScene.findNode("oomEmitterBlockXform");
+        //auto belLiqVoxelForm = belScene.findNode("oomLiqVoxelXform");
+        auto belBevel = belScene.findNode("oomBevel");
 
         auto modelXform = belScene.createNode("xform", canonicalName, canonicalName);
         modelXform["steps"][0]["xform"] = dl::Mat4 {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
@@ -534,7 +550,7 @@ dl::bella_sdk::Node addModelToScene(dl::Args& args,
                 } else if(vmaxMaterial[material].emission > 0.0f) {
                     belMaterial["type"] = "emitter";
                     belMaterial["emitterUnit"] = "radiance";
-                    belMaterial["emitterEnergy"] = vmaxMaterial[material].emission*1.0f;
+                    belMaterial["emitterEnergy"] = vmaxMaterial[material].emission*100.0f;
                 } else if(vmaxMaterial[material].roughness > 0.8999f) {
                     belMaterial["type"] = "diffuse";
                 } else {
